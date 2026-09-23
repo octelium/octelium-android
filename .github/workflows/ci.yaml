@@ -1,0 +1,63 @@
+name: CI
+
+permissions: {}
+
+env:
+  NDK_VERSION: 30.0.16248370
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Install the Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" "ndk;$NDK_VERSION" "cmake;4.1.2"
+      - run: ./gradlew --no-configuration-cache :core:test :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+
+  jni:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: octelium/octelium
+          ref: main
+          path: octelium-source
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: octelium-source/go.work
+          cache-dependency-path: octelium-source/client/liboctelium/go.sum
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Build the host libraries
+        env:
+          OCTELIUM_SOURCE_DIR: ${{ github.workspace }}/octelium-source
+        run: ./scripts/build-host-libs.sh
+      - name: Run the JNI integration tests
+        run: ./gradlew --no-configuration-cache :app:testDebugUnitTest --tests 'com.octelium.client.lib.*'

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Octelium</string>
+    <string name="notification_channel_vpn">VPN status</string>
+    <string name="notification_channel_vpn_description">Shows the state of the Octelium Connection</string>
+    <string name="notification_channel_alerts">Alerts</string>
+    <string name="notification_channel_alerts_description">Shows the Octelium issues that require your attention</string>
+</resources>

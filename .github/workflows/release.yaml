@@ -1,0 +1,176 @@
+name: Release
+
+permissions: {}
+
+env:
+  NDK_VERSION: 30.0.16248370
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      octelium-tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Validate versions
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${RELEASE_VERSION#v}"
+          version="$(sed -n 's/^octelium.version=\(.*\)$/\1/p' gradle.properties)"
+          [[ "$version" == "$expected" ]]
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="$(gh release view --repo octelium/octelium --json tagName --jq .tagName)"
+          [[ "$requested" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "tag=$requested" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: validate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: octelium/octelium
+          ref: ${{ needs.validate.outputs.octelium-tag }}
+          path: octelium-source
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: octelium-source/go.work
+          cache-dependency-path: octelium-source/client/liboctelium/go.sum
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-disabled: true
+      - name: Install the Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" "ndk;$NDK_VERSION" "cmake;4.1.2"
+      - name: Build liboctelium ${{ needs.validate.outputs.octelium-tag }}
+        shell: bash
+        env:
+          OCTELIUM_SOURCE_DIR: ${{ github.workspace }}/octelium-source
+          OCTELIUM_TAG: ${{ needs.validate.outputs.octelium-tag }}
+        run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION" ./scripts/build-liboctelium.sh
+      - name: Build the host libraries
+        env:
+          OCTELIUM_SOURCE_DIR: ${{ github.workspace }}/octelium-source
+        run: ./scripts/build-host-libs.sh
+      - name: Test
+        run: ./gradlew --no-configuration-cache :core:test :app:testDebugUnitTest :app:lintRelease
+      - name: Prepare the signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$KEYSTORE_BASE64" ]]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/octelium.jks"
+            echo "OCTELIUM_ANDROID_KEYSTORE=$RUNNER_TEMP/octelium.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set. The release artifacts are unsigned."
+          fi
+      - name: Build application
+        env:
+          OCTELIUM_ANDROID_RELEASE_TAG: ${{ github.ref_name }}
+          OCTELIUM_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          OCTELIUM_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          OCTELIUM_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-configuration-cache :app:assembleRelease :app:bundleRelease
+      - name: Verify the artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
+          apk="$(find app/build/outputs/apk/release -name '*.apk' -print -quit)"
+          ./scripts/check-elf-alignment.sh "$apk"
+          ./scripts/check-elf-alignment.sh app/build/outputs/bundle/release/app-release.aab
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 "$apk"
+          if [[ -n "${OCTELIUM_ANDROID_KEYSTORE:-}" ]]; then
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk"
+          fi
+      - name: Collect artifacts
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+          OCTELIUM_TAG: ${{ needs.validate.outputs.octelium-tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="release-output"
+          suffix="$([[ -n "${OCTELIUM_ANDROID_KEYSTORE:-}" ]] && echo "" || echo "-unsigned")"
+          mkdir "$output"
+          apk="$(find app/build/outputs/apk/release -name '*.apk' -print -quit)"
+          cp "$apk" "$output/octelium-android-${RELEASE_VERSION}${suffix}.apk"
+          cp app/build/outputs/bundle/release/app-release.aab "$output/octelium-android-${RELEASE_VERSION}${suffix}.aab"
+          cp app/build/outputs/mapping/release/mapping.txt "$output/octelium-android-${RELEASE_VERSION}-mapping.txt"
+          printf '%s\n' "$OCTELIUM_TAG" > "$output/OCTELIUM_VERSION"
+          cp liboctelium/OCTELIUM_COMMIT "$output/OCTELIUM_COMMIT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-android
+          path: release-output/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: release-*
+          path: artifacts
+      - name: Prepare release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-files
+          find artifacts -type f -exec cp {} release-files/ \;
+          cd release-files
+          sha256sum * > SHA256SUMS
+      - id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-checksums: release-files/SHA256SUMS
+      - name: Add attestation
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        shell: bash
+        run: cp "$ATTESTATION_BUNDLE" release-files/release-attestation.json
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
+        with:
+          draft: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release-files/*
