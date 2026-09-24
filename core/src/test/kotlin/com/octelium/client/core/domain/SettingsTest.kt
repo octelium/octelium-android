@@ -60,7 +60,8 @@ class SettingsTest {
     fun testValidateDomainSettingsForm() {
         assertNull(validateDomainSettingsForm(DomainSettingsForm()))
         assertNull(validateDomainSettingsForm(DomainSettingsForm(mtu = " ")))
-        assertNull(validateDomainSettingsForm(DomainSettingsForm(mtu = "576")))
+        assertNull(validateDomainSettingsForm(DomainSettingsForm(mtu = "576", l3Mode = ConnectionOptions.L3Mode.V4)))
+        assertNull(validateDomainSettingsForm(DomainSettingsForm(mtu = "1280")))
         assertNull(validateDomainSettingsForm(DomainSettingsForm(mtu = "1500")))
         assertEquals(
             "The MTU must be between 576 and 1500",
@@ -74,6 +75,17 @@ class SettingsTest {
             "The MTU must be between 576 and 1500",
             validateDomainSettingsForm(DomainSettingsForm(mtu = "abc")),
         )
+
+        for (itm in listOf(
+            ConnectionOptions.L3Mode.L3_MODE_UNSPECIFIED,
+            ConnectionOptions.L3Mode.BOTH,
+            ConnectionOptions.L3Mode.V6,
+        )) {
+            assertEquals(
+                "The MTU must be at least 1280 unless the IPv4 only mode is used",
+                validateDomainSettingsForm(DomainSettingsForm(mtu = "1279", l3Mode = itm)),
+            )
+        }
     }
 
     @Test

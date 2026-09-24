@@ -44,6 +44,10 @@ class NetworkMonitor(
         .map { it?.isAvailable == false }
         .stateIn(scope, SharingStarted.Eagerly, false)
 
+    val underlyingNetworks: StateFlow<List<Network>?> = combine(_network, state) { network, s ->
+        if (s == null) null else listOfNotNull(network)
+    }.stateIn(scope, SharingStarted.Eagerly, null)
+
     private val callback = object : ConnectivityManager.NetworkCallback() {
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
             if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {

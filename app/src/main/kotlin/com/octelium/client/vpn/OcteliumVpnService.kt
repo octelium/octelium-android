@@ -29,6 +29,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
@@ -50,6 +51,8 @@ class OcteliumVpnService : VpnService() {
     @Volatile
     private var isStopping = false
 
+    private val startID = MutableStateFlow(0)
+
     override fun onCreate() {
         super.onCreate()
 
@@ -60,7 +63,8 @@ class OcteliumVpnService : VpnService() {
                 container.statusStore.status,
                 container.tunnels.holds,
                 container.runtime.state,
-            ) { status, holds, runtime -> Triple(status, holds, runtime) }.collectLatest { (status, holds, runtime) ->
+                startID,
+            ) { status, holds, runtime, _ -> Triple(status, holds, runtime) }.collectLatest { (status, holds, runtime) ->
                 if (isStopping) {
                     return@collectLatest
                 }
@@ -84,14 +88,15 @@ class OcteliumVpnService : VpnService() {
         }
 
         scope.launch {
-            container.network.network.filterNotNull().collectLatest {
-                setUnderlyingNetworks(arrayOf(it))
+            container.network.underlyingNetworks.filterNotNull().collectLatest {
+                setUnderlyingNetworks(it.toTypedArray())
             }
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         isStopping = false
+        startID.value = startId
 
         if (!startForeground()) {
             stop()
@@ -170,8 +175,8 @@ class OcteliumVpnService : VpnService() {
             builder.allowFamily(if (itm == IPFamily.V4) OsConstants.AF_INET else OsConstants.AF_INET6)
         }
 
-        container.network.network.value?.let {
-            builder.setUnderlyingNetworks(arrayOf(it))
+        container.network.underlyingNetworks.value?.let {
+            builder.setUnderlyingNetworks(it.toTypedArray())
         }
 
         val pfd = builder.establish() ?: throw IllegalStateException("The VPN permission is not granted")
@@ -243,10 +248,13 @@ class OcteliumVpnService : VpnService() {
     }
 
     private fun stop() {
+        if (!stopSelfResult(startID.value)) {
+            return
+        }
+
         isStopping = true
         closeTun()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        stopSelf()
     }
 
     companion object {

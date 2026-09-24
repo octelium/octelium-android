@@ -12,6 +12,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -23,11 +26,16 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.octelium.client.BuildConfig
 import com.octelium.client.R
+import com.octelium.client.core.cluster.getClusterAPIHost
 import com.octelium.client.core.domain.LabelTone
 import com.octelium.client.core.domain.getAuthenticationStateLabel
 import com.octelium.client.core.domain.getConnectionStateLabel
 import com.octelium.client.core.domain.toRFC3339
 import com.octelium.client.core.local.formatLog
+import com.octelium.client.core.network.HostCheck
+import com.octelium.client.core.network.HostResolution
+import com.octelium.client.core.network.getHostCheckError
+import com.octelium.client.core.network.getHostResolutionLabel
 import com.octelium.client.core.network.getNetworkLabel
 import com.octelium.client.lib.ABI_VERSION
 import com.octelium.client.runtime.RuntimeState
@@ -44,6 +52,7 @@ import com.octelium.client.ui.components.PageHeader
 import com.octelium.client.ui.components.SectionCard
 import com.octelium.client.ui.components.SectionTitle
 import com.octelium.client.ui.components.copyToClipboard
+import com.octelium.client.ui.components.rememberMutation
 import com.octelium.client.ui.connection.InfoGrid
 import com.octelium.client.ui.settings.getLibVersion
 import com.octelium.client.ui.theme.OcteliumTheme
@@ -120,6 +129,7 @@ fun DiagnosticsScreen(vm: MainViewModel) {
                         item("Credentials expire at") { Mono(text = toRFC3339(itm.authentication.expiresAt) ?: "—") }
                         item("Connected at") { Mono(text = toRFC3339(itm.connection.connectedAt) ?: "—") }
                         item("Last error") { InfoText(itm.lastError.message.ifEmpty { "—" }) }
+                        item("Cluster API") { ClusterAPICheck(vm, itm.domain) }
                     }
                 }
             }
@@ -160,6 +170,41 @@ fun DiagnosticsScreen(vm: MainViewModel) {
 }
 
 private const val MAX_VISIBLE_LOGS = 200
+
+@Composable
+private fun ClusterAPICheck(vm: MainViewModel, domain: String) {
+    var result by remember(domain) { mutableStateOf<HostCheck?>(null) }
+    val mutation = rememberMutation<String> { result = vm.checkClusterAPIHost(it) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Mono(text = getClusterAPIHost(domain), modifier = Modifier.weight(1f))
+            OctButton(
+                text = "Check DNS",
+                onClick = { mutation.mutate(domain) },
+                variant = ButtonVariant.DEFAULT,
+                size = ButtonSize.XS,
+                isLoading = mutation.isPending,
+                enabled = !mutation.isPending,
+            )
+        }
+
+        result?.let {
+            Label(
+                text = getHostResolutionLabel(it.resolution),
+                tone = if (it.resolution == HostResolution.RESOLVED) LabelTone.EMERALD else LabelTone.ROSE,
+            )
+
+            if (it.resolution == HostResolution.RESOLVED) {
+                Mono(text = it.addresses.joinToString(", "))
+            } else {
+                getHostCheckError(it)?.let { msg -> InfoText(text = msg) }
+            }
+        }
+
+        mutation.error?.let { InfoText(text = it) }
+    }
+}
 
 @Composable
 private fun LogList(logs: List<Mobilev1.Log>) {

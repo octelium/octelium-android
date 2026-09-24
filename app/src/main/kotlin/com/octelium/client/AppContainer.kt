@@ -10,7 +10,9 @@ import com.octelium.client.core.cluster.getClusterAPIHost
 import com.octelium.client.core.cluster.getSessionKeys
 import com.octelium.client.core.local.LogStore
 import com.octelium.client.core.local.StatusStore
+import com.octelium.client.core.network.HostResolver
 import com.octelium.client.network.NetworkMonitor
+import com.octelium.client.network.SystemHostResolver
 import com.octelium.client.prefs.PrefsRepository
 import com.octelium.client.runtime.ClientRuntime
 import com.octelium.client.runtime.OcteliumRuntime
@@ -30,6 +32,7 @@ class AppContainer(
     getRuntime: ((AppContainer) -> ClientRuntime)? = null,
     channels: ChannelFactory? = null,
     preferences: PrefsRepository? = null,
+    resolver: HostResolver? = null,
 ) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -40,10 +43,12 @@ class AppContainer(
     val runtime: ClientRuntime = getRuntime?.invoke(this)
         ?: OcteliumRuntime(context, scope, statusStore, logStore, tunnels)
     val network = NetworkMonitor(context, scope, runtime)
+    val hosts: HostResolver = resolver ?: SystemHostResolver(context)
     val auth = AuthController(
         getClient = { runtime.awaitClient() },
         getInfo = { runtime.awaitInfo() },
         statusStore = statusStore,
+        hosts = hosts,
     )
     val vpn = VpnController(context, runtime, statusStore, tunnels, prefs)
 

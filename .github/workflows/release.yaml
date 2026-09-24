@@ -87,15 +87,20 @@ jobs:
       - name: Prepare the signing key
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -n "$KEYSTORE_BASE64" ]]; then
-            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/octelium.jks"
-            echo "OCTELIUM_ANDROID_KEYSTORE=$RUNNER_TEMP/octelium.jks" >> "$GITHUB_ENV"
-          else
-            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set. The release artifacts are unsigned."
-          fi
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::The ANDROID_${name} secret is not set. Android releases must be signed."
+              exit 1
+            fi
+          done
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/octelium.jks"
+          echo "OCTELIUM_ANDROID_KEYSTORE=$RUNNER_TEMP/octelium.jks" >> "$GITHUB_ENV"
       - name: Build application
         env:
           OCTELIUM_ANDROID_RELEASE_TAG: ${{ github.ref_name }}
@@ -108,13 +113,14 @@ jobs:
         run: |
           set -euo pipefail
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
-          apk="$(find app/build/outputs/apk/release -name '*.apk' -print -quit)"
+          apk="app/build/outputs/apk/release/app-release.apk"
           ./scripts/check-elf-alignment.sh "$apk"
           ./scripts/check-elf-alignment.sh app/build/outputs/bundle/release/app-release.aab
           "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 "$apk"
-          if [[ -n "${OCTELIUM_ANDROID_KEYSTORE:-}" ]]; then
-            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk"
-          fi
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk"
+          aab="$(jarsigner -verify app/build/outputs/bundle/release/app-release.aab)"
+          echo "$aab"
+          grep -q "jar verified" <<< "$aab"
       - name: Collect artifacts
         env:
           RELEASE_VERSION: ${{ github.ref_name }}
@@ -123,11 +129,9 @@ jobs:
         run: |
           set -euo pipefail
           output="release-output"
-          suffix="$([[ -n "${OCTELIUM_ANDROID_KEYSTORE:-}" ]] && echo "" || echo "-unsigned")"
           mkdir "$output"
-          apk="$(find app/build/outputs/apk/release -name '*.apk' -print -quit)"
-          cp "$apk" "$output/octelium-android-${RELEASE_VERSION}${suffix}.apk"
-          cp app/build/outputs/bundle/release/app-release.aab "$output/octelium-android-${RELEASE_VERSION}${suffix}.aab"
+          cp app/build/outputs/apk/release/app-release.apk "$output/octelium-android-${RELEASE_VERSION}.apk"
+          cp app/build/outputs/bundle/release/app-release.aab "$output/octelium-android-${RELEASE_VERSION}.aab"
           cp app/build/outputs/mapping/release/mapping.txt "$output/octelium-android-${RELEASE_VERSION}-mapping.txt"
           printf '%s\n' "$OCTELIUM_TAG" > "$output/OCTELIUM_VERSION"
           cp liboctelium/OCTELIUM_COMMIT "$output/OCTELIUM_COMMIT"

@@ -177,6 +177,17 @@ class TunnelSpecTest {
             )
             assertTrue(ret.searchDomains.isEmpty())
         }
+
+        run {
+            val ret = getTunnelSpec(
+                Mobilev1.TunnelConfiguration.newBuilder()
+                    .addAddresses("10.1.2.3/32")
+                    .addRoutes("10.1.0.0/16")
+                    .setMtu(576)
+                    .build(),
+            )
+            assertEquals(576, ret.mtu)
+        }
     }
 
     @Test
@@ -208,6 +219,25 @@ class TunnelSpecTest {
                 Mobilev1.TunnelConfiguration.newBuilder()
                     .addAddresses("10.1.2.3/32")
                     .setMtu(100)
+                    .build(),
+            )
+        }
+
+        assertInvalid("The MTU 1279 is lower than the minimum IPv6 MTU of 1280") {
+            getTunnelSpec(
+                Mobilev1.TunnelConfiguration.newBuilder()
+                    .addAddresses("fdee:1::5/128")
+                    .setMtu(1279)
+                    .build(),
+            )
+        }
+
+        assertInvalid("The MTU 576 is lower than the minimum IPv6 MTU of 1280") {
+            getTunnelSpec(
+                Mobilev1.TunnelConfiguration.newBuilder()
+                    .addAddresses("10.1.2.3/32")
+                    .addRoutes("fdee:1::/64")
+                    .setMtu(576)
                     .build(),
             )
         }

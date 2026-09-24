@@ -4,6 +4,8 @@ import com.octelium.client.core.local.LocalClient
 import com.octelium.client.core.local.LocalTransport
 import com.octelium.client.core.local.StatusStore
 import com.octelium.client.core.local.getStatusException
+import com.octelium.client.core.network.HostResolver
+import com.octelium.client.core.network.getHostCheck
 import io.grpc.Status
 import io.grpc.StatusException
 import kotlinx.coroutines.test.runTest
@@ -20,6 +22,7 @@ class AuthControllerTest {
     private val callbackURL = "com.octelium.client:/callback/success"
 
     private class FakeDaemon : LocalTransport {
+        val calls = mutableListOf<String>()
         val waiting = linkedMapOf<String, String>()
         val validOperationID = mutableSetOf<String>()
         val completed = mutableListOf<Pair<String, String>>()
@@ -33,7 +36,7 @@ class AuthControllerTest {
                 .setState(state)
                 .build()
 
-        override suspend fun call(method: String, request: ByteArray): ByteArray = when (method) {
+        override suspend fun call(method: String, request: ByteArray): ByteArray = when (method.also { calls.add(it) }) {
             "Authenticate" -> {
                 val req = Daemonv1.AuthenticateRequest.parseFrom(request)
                 val id = "op-${nextID++}"
@@ -70,12 +73,16 @@ class AuthControllerTest {
         }
     }
 
-    private fun getController(daemon: FakeDaemon, statusStore: StatusStore = StatusStore()): AuthController =
-        AuthController(
-            getClient = { LocalClient(daemon) },
-            getInfo = { Mobilev1.GetInfoResponse.newBuilder().setAuthenticationCallbackURL(callbackURL).build() },
-            statusStore = statusStore,
-        )
+    private fun getController(
+        daemon: FakeDaemon,
+        statusStore: StatusStore = StatusStore(),
+        hosts: HostResolver? = null,
+    ): AuthController = AuthController(
+        getClient = { LocalClient(daemon) },
+        getInfo = { Mobilev1.GetInfoResponse.newBuilder().setAuthenticationCallbackURL(callbackURL).build() },
+        statusStore = statusStore,
+        hosts = hosts,
+    )
 
     @Test
     fun testCompleteAuthentication() = runTest {
@@ -134,6 +141,54 @@ class AuthControllerTest {
             } catch (err: StatusException) {
                 assertEquals(Status.Code.INVALID_ARGUMENT, err.status.code)
             }
+        }
+    }
+
+    @Test
+    fun testCheckClusterAPIHost() = runTest {
+        run {
+            val daemon = FakeDaemon()
+            val checked = mutableListOf<String>()
+            val c = getController(daemon, hosts = { checked.add(it); getHostCheck(it, listOf("192.0.2.1"), null) })
+
+            c.authenticateBrowser("a.example.com")
+            c.authenticateToken("b.example.com", "token")
+            assertEquals(listOf("octelium-api.a.example.com", "octelium-api.b.example.com"), checked)
+            assertEquals(2, daemon.calls.count { it == "Authenticate" })
+        }
+
+        run {
+            val daemon = FakeDaemon()
+            val c = getController(daemon, hosts = { getHostCheck(it, emptyList(), listOf("192.0.2.1")) })
+
+            try {
+                c.authenticateBrowser("example.com")
+                fail()
+            } catch (err: IllegalStateException) {
+                assertTrue(err.message!!.startsWith("octelium-api.example.com resolves to 192.0.2.1 but Android refuses"))
+            }
+
+            try {
+                c.authenticateToken("example.com", "token")
+                fail()
+            } catch (err: IllegalStateException) {
+                assertTrue(err.message!!.startsWith("octelium-api.example.com resolves to 192.0.2.1"))
+            }
+
+            assertTrue(daemon.calls.isEmpty())
+        }
+
+        run {
+            val daemon = FakeDaemon()
+            val c = getController(daemon, hosts = { getHostCheck(it, emptyList(), emptyList()) })
+
+            try {
+                c.authenticateBrowser("example.com")
+                fail()
+            } catch (err: IllegalStateException) {
+                assertTrue(err.message!!.startsWith("octelium-api.example.com could not be found."))
+            }
+            assertTrue(daemon.calls.isEmpty())
         }
     }
 

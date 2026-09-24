@@ -18,6 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -74,7 +75,7 @@ fun ClusterSignIn(
     val isBusy = isConnectionBusy(getDomainState(status, domain))
 
     var domainInput by rememberSaveable { mutableStateOf("") }
-    var token by rememberSaveable { mutableStateOf("") }
+    var token by remember { mutableStateOf("") }
     var isAdvanced by rememberSaveable { mutableStateOf(false) }
 
     val mutation = rememberMutation<SignInMethod>(

@@ -23,7 +23,9 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ServicesViewModelTest {
@@ -31,6 +33,7 @@ class ServicesViewModelTest {
     private val dispatcher = StandardTestDispatcher()
     private val serverName = "services-${UUID.randomUUID()}"
     private var isFailing = false
+    private val listCalls = AtomicInteger()
 
     private val services = (0 until 120).map { idx ->
         Userv1.Service.newBuilder()
@@ -51,6 +54,8 @@ class ServicesViewModelTest {
         .directExecutor()
         .addService(object : MainServiceGrpcKt.MainServiceCoroutineImplBase(Dispatchers.Unconfined) {
             override suspend fun listService(request: Userv1.ListServiceOptions): Userv1.ServiceList {
+                listCalls.incrementAndGet()
+
                 if (isFailing) {
                     throw StatusException(Status.UNAVAILABLE.withDescription("unreachable"))
                 }
@@ -168,6 +173,63 @@ class ServicesViewModelTest {
             advanceUntilIdle()
             assertTrue(vm.state.value.items.isEmpty())
             assertNull(vm.state.value.error)
+        }
+    }
+
+    @Test
+    fun testSearchCache() = runTest(dispatcher) {
+        var now = Instant.parse("2026-01-01T00:00:00Z")
+        val vm = ServicesViewModel(cluster, "example.com") { now }
+        advanceUntilIdle()
+        assertEquals(1, listCalls.get())
+
+        run {
+            vm.setSearch("api-1")
+            advanceUntilIdle()
+            assertEquals(3, listCalls.get())
+            assertTrue(vm.state.value.items.all { it.metadata.name.contains("api-1") })
+        }
+
+        run {
+            vm.setSearch("db-3")
+            assertFalse(vm.state.value.isLoading)
+            assertTrue(vm.state.value.items.all { it.metadata.name.contains("db-3") })
+            assertEquals(listOf("db-3.staging", "db-31.staging"), vm.state.value.items.map { it.metadata.name }.take(2))
+            advanceUntilIdle()
+            assertEquals(3, listCalls.get())
+        }
+
+        run {
+            vm.setNamespace("staging")
+            advanceUntilIdle()
+            assertEquals(4, listCalls.get())
+            assertTrue(vm.state.value.items.all { it.status.namespace == "staging" })
+
+            vm.setSearch("db-5")
+            advanceUntilIdle()
+            assertEquals(4, listCalls.get())
+            assertTrue(vm.state.value.items.isNotEmpty())
+        }
+
+        run {
+            now = now.plusSeconds(31)
+            vm.setSearch("db-7")
+            advanceUntilIdle()
+            assertEquals(5, listCalls.get())
+        }
+
+        run {
+            vm.refresh()
+            advanceUntilIdle()
+            assertEquals(6, listCalls.get())
+            assertFalse(vm.state.value.isRefreshing)
+        }
+
+        run {
+            vm.setSearch("")
+            advanceUntilIdle()
+            assertEquals(7, listCalls.get())
+            assertEquals(ServicesViewModel.ITEMS_PER_PAGE, vm.state.value.items.size)
         }
     }
 

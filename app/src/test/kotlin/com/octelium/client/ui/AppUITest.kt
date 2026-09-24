@@ -4,7 +4,7 @@ import android.app.Application
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.hasScrollToNodeAction
 import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -16,6 +16,8 @@ import androidx.compose.ui.test.performTextInput
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.octelium.client.AppContainer
+import com.octelium.client.core.network.HostResolver
+import com.octelium.client.core.network.getHostCheck
 import com.octelium.client.prefs.PrefsRepository
 import com.octelium.client.runtime.RuntimeState
 import io.grpc.inprocess.InProcessChannelBuilder
@@ -67,6 +69,7 @@ class AppUITest {
     private fun launch(
         domains: List<Daemonv1.DomainState>,
         runtimeState: RuntimeState? = null,
+        resolver: HostResolver = HostResolver { getHostCheck(it, listOf("192.0.2.1"), null) },
     ): FakeDaemon {
         lateinit var daemon: FakeDaemon
 
@@ -80,6 +83,7 @@ class AppUITest {
             preferences = PrefsRepository(
                 PreferenceDataStoreFactory.create(scope = scope) { File(tmp.root, "prefs.preferences_pb") },
             ),
+            resolver = resolver,
         )
 
         container.statusStore.update(daemon.getStatus())
@@ -117,6 +121,23 @@ class AppUITest {
 
         waitForText("Invalid Cluster domain")
         composeRule.onNodeWithText("Could not start sign in").assertExists()
+    }
+
+    @Test
+    fun testSignInClusterAPIHost() {
+        val daemon = launch(
+            emptyList(),
+            resolver = { getHostCheck(it, emptyList(), listOf("192.0.2.1")) },
+        )
+
+        waitForText("Welcome to Octelium")
+        composeRule.onNode(hasText("example.com")).performTextInput("c01.example.com")
+        composeRule.onNodeWithText("Continue in browser").performClick()
+
+        waitForText("Could not start sign in")
+        waitForText("octelium-api.c01.example.com resolves to 192.0.2.1 but Android refuses", substring = true)
+        assertTrue(daemon.calls.none { it == "Authenticate" })
+        capture("sign-in-api-host")
     }
 
     @Test
@@ -271,6 +292,12 @@ class AppUITest {
         composeRule.onNodeWithText("v1.0").assertExists()
         composeRule.onNodeWithText(TEST_CALLBACK_URL).assertExists()
         capture("diagnostics")
+
+        composeRule.onNodeWithText("octelium-api.example.com").assertExists()
+        composeRule.onNodeWithText("Check DNS").performScrollTo().performClick()
+        waitForText("Resolved")
+        composeRule.onNodeWithText("192.0.2.1").performScrollTo()
+        capture("diagnostics-dns")
     }
 
     @Test

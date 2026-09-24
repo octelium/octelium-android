@@ -58,6 +58,11 @@ The rule that the whole application follows is:
 * The browser authentication uses Custom Tabs. The Portal redirects to
   `com.octelium.client:/callback/success` which is validated and passed to
   `CompleteAuthentication`.
+* Before signing in, `octelium-api.<domain>` is resolved with the Android resolver, the one that
+  liboctelium and the Cluster API client use. Android refuses DNS answers that include names that
+  are not valid host names, such as a CNAME whose target label begins with `_`, even though
+  browsers resolve them. Such a failure is reported before the browser is opened and the check
+  can be repeated from the diagnostics.
 
 ## Repository layout
 
@@ -155,9 +160,10 @@ with the Octelium commit in `OCTELIUM_COMMIT`.
 
 `release.yaml` runs for semantic `v*.*.*` tags. It verifies that `octelium.version` of
 `gradle.properties` matches the tag, builds liboctelium out of the latest published Octelium
-release, builds and verifies the signed APK and AAB whenever the `ANDROID_KEYSTORE_BASE64`,
-`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD` secrets are set,
-generates checksums and provenance and publishes a GitHub release.
+release, builds and verifies the signed APK and AAB, generates checksums and provenance and
+publishes a GitHub release. Android cannot install unsigned APKs, hence the release fails unless
+the `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and
+`ANDROID_KEY_PASSWORD` secrets are set.
 
 ## Releasing
 

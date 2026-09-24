@@ -9,8 +9,10 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.octelium.client.AppContainer
 import com.octelium.client.OcteliumApp
 import com.octelium.client.core.cluster.ClusterClient
+import com.octelium.client.core.cluster.getClusterAPIHost
 import com.octelium.client.core.domain.resolveSelectedDomain
 import com.octelium.client.core.local.getErrorMessage
+import com.octelium.client.core.network.HostCheck
 import com.octelium.client.core.prefs.Prefs
 import com.octelium.client.core.prefs.ThemeMode
 import com.octelium.client.runtime.RuntimeState
@@ -121,6 +123,8 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         selectDomain(ret.domain.ifEmpty { domain })
         return ret
     }
+
+    suspend fun checkClusterAPIHost(domain: String): HostCheck = container.hosts.check(getClusterAPIHost(domain))
 
     fun handleAuthCallback(url: String) {
         viewModelScope.launch {

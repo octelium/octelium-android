@@ -42,6 +42,7 @@ data class TunnelSpec(
 class InvalidTunnelConfigurationException(message: String) : IllegalArgumentException(message)
 
 const val MIN_TUNNEL_MTU = 576
+const val MIN_IPV6_TUNNEL_MTU = 1280
 const val MAX_TUNNEL_MTU = 9000
 
 private val rgxSearchDomain = Regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
@@ -202,6 +203,12 @@ fun getTunnelSpec(cfg: Mobilev1.TunnelConfiguration): TunnelSpec {
     addresses.forEach { families.add(it.family) }
     routes.forEach { families.add(it.family) }
     dnsServers.forEach { families.add(getFamily(it)) }
+
+    if (cfg.mtu != 0 && cfg.mtu < MIN_IPV6_TUNNEL_MTU && families.contains(IPFamily.V6)) {
+        throw InvalidTunnelConfigurationException(
+            "The MTU ${cfg.mtu} is lower than the minimum IPv6 MTU of $MIN_IPV6_TUNNEL_MTU",
+        )
+    }
 
     return TunnelSpec(
         addresses = addresses,

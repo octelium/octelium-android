@@ -4,6 +4,7 @@ import octelium.api.client.daemon.v1.Daemonv1.ConnectionOptions
 import octelium.api.client.daemon.v1.Daemonv1.DomainSettings
 
 const val MIN_MTU = 576
+const val MIN_IPV6_MTU = 1280
 const val MAX_MTU = 1500
 
 val TUNNEL_MODES = listOf(
@@ -65,6 +66,10 @@ fun validateDomainSettingsForm(form: DomainSettingsForm): String? {
     val value = mtu.toIntOrNull()
     if (value == null || value < MIN_MTU || value > MAX_MTU) {
         return "The MTU must be between $MIN_MTU and $MAX_MTU"
+    }
+
+    if (value < MIN_IPV6_MTU && form.l3Mode != ConnectionOptions.L3Mode.V4) {
+        return "The MTU must be at least $MIN_IPV6_MTU unless the IPv4 only mode is used"
     }
 
     return null
