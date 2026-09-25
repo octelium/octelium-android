@@ -26,18 +26,21 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.octelium.client.BuildConfig
 import com.octelium.client.R
+import com.octelium.client.core.auth.AUTH_CALLBACK_URL
 import com.octelium.client.core.cluster.getClusterAPIHost
 import com.octelium.client.core.domain.LabelTone
 import com.octelium.client.core.domain.getAuthenticationStateLabel
 import com.octelium.client.core.domain.getConnectionStateLabel
 import com.octelium.client.core.domain.toRFC3339
+import com.octelium.client.core.local.LogEntry
+import com.octelium.client.core.local.LogLevel
 import com.octelium.client.core.local.formatLog
 import com.octelium.client.core.network.HostCheck
 import com.octelium.client.core.network.HostResolution
 import com.octelium.client.core.network.getHostCheckError
 import com.octelium.client.core.network.getHostResolutionLabel
 import com.octelium.client.core.network.getNetworkLabel
-import com.octelium.client.lib.ABI_VERSION
+import com.octelium.client.lib.formatABIVersion
 import com.octelium.client.runtime.RuntimeState
 import com.octelium.client.ui.MainViewModel
 import com.octelium.client.ui.ScreenColumn
@@ -56,7 +59,6 @@ import com.octelium.client.ui.components.rememberMutation
 import com.octelium.client.ui.connection.InfoGrid
 import com.octelium.client.ui.settings.getLibVersion
 import com.octelium.client.ui.theme.OcteliumTheme
-import octelium.api.client.mobile.v1.Mobilev1
 
 @Composable
 fun DiagnosticsScreen(vm: MainViewModel) {
@@ -89,10 +91,7 @@ fun DiagnosticsScreen(vm: MainViewModel) {
 
                 InfoGrid {
                     item("Version") { InfoText(getLibVersion(info?.version)) }
-                    item("Local API") {
-                        InfoText(info?.let { "v${it.apiMajorVersion}.${it.apiMinorVersion}" } ?: "—")
-                    }
-                    item("C ABI") { InfoText("v$ABI_VERSION") }
+                    item("C ABI") { InfoText(info?.let { "v${formatABIVersion(it.abiVersion)}" } ?: "—") }
                     item("State revision") { InfoText(status?.revision?.toString() ?: "—") }
                     item("Instance") { Mono(text = info?.instanceID?.take(12) ?: "—") }
                     item("Commit") { Mono(text = BuildConfig.LIBOCTELIUM_COMMIT.take(12).ifEmpty { "—" }) }
@@ -159,11 +158,9 @@ fun DiagnosticsScreen(vm: MainViewModel) {
                 }
             }
 
-            info?.let {
-                SectionCard {
-                    SectionTitle(text = "Authentication callback", modifier = Modifier.padding(bottom = 8.dp))
-                    CopyText(value = it.authenticationCallbackURL)
-                }
+            SectionCard {
+                SectionTitle(text = "Authentication callback", modifier = Modifier.padding(bottom = 8.dp))
+                CopyText(value = AUTH_CALLBACK_URL)
             }
         }
     }
@@ -207,7 +204,7 @@ private fun ClusterAPICheck(vm: MainViewModel, domain: String) {
 }
 
 @Composable
-private fun LogList(logs: List<Mobilev1.Log>) {
+private fun LogList(logs: List<LogEntry>) {
     val colors = OcteliumTheme.colors
 
     Column(
@@ -222,10 +219,10 @@ private fun LogList(logs: List<Mobilev1.Log>) {
             Text(
                 text = formatLog(itm),
                 color = when (itm.level) {
-                    Mobilev1.Log.Level.ERROR -> Color(0xFFF43F5E)
-                    Mobilev1.Log.Level.WARN -> Color(0xFFF59E0B)
-                    Mobilev1.Log.Level.DEBUG -> colors.faint
-                    else -> colors.body
+                    LogLevel.ERROR -> Color(0xFFF43F5E)
+                    LogLevel.WARN -> Color(0xFFF59E0B)
+                    LogLevel.DEBUG -> colors.faint
+                    LogLevel.INFO -> colors.body
                 },
                 fontFamily = FontFamily.Monospace,
                 fontSize = 11.sp,

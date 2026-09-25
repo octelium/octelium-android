@@ -13,6 +13,11 @@ fun toInstant(arg: Timestamp?): Instant? {
     return Instant.ofEpochSecond(arg.seconds, arg.nanos.toLong())
 }
 
+fun toTimestamp(arg: Instant): Timestamp = Timestamp.newBuilder()
+    .setSeconds(arg.epochSecond)
+    .setNanos(arg.nano)
+    .build()
+
 fun toRFC3339(arg: Timestamp?): String? = toInstant(arg)?.let { DateTimeFormatter.ISO_INSTANT.format(it) }
 
 fun printDuration(from: Timestamp?, now: Instant = Instant.now()): String {

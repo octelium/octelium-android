@@ -1,9 +1,7 @@
 package com.octelium.client.core.tunnel
 
-import com.google.protobuf.InvalidProtocolBufferException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import octelium.api.client.mobile.v1.Mobilev1
 import java.util.concurrent.atomic.AtomicLong
 
 interface EstablishedTunnel {
@@ -19,7 +17,7 @@ interface TunnelHost {
 }
 
 fun interface RequestCompleter {
-    fun complete(requestID: Long, response: ByteArray): Int
+    fun complete(requestID: Long, response: TunnelResponse): Int
 }
 
 class PlatformRequestHandler(
@@ -29,70 +27,40 @@ class PlatformRequestHandler(
     private val mutex = Mutex()
     private val latestGeneration = AtomicLong(0)
 
-    suspend fun handle(requestID: Long, data: ByteArray) {
-        val req = try {
-            Mobilev1.PlatformRequest.parseFrom(data)
-        } catch (err: InvalidProtocolBufferException) {
-            completeError(requestID, "Could not unmarshal the platform request: ${err.message}")
-            return
-        }
+    suspend fun applyNetworkConfig(requestID: Long, domain: String, cfg: NetworkConfig) {
+        latestGeneration.updateAndGet { maxOf(it, cfg.generation) }
 
-        when (req.typeCase) {
-            Mobilev1.PlatformRequest.TypeCase.APPLYTUNNELCONFIGURATION ->
-                applyTunnelConfiguration(requestID, req.applyTunnelConfiguration)
-
-            else -> completeError(requestID, "Unsupported platform request: ${req.typeCase}")
-        }
-    }
-
-    private suspend fun applyTunnelConfiguration(
-        requestID: Long,
-        req: Mobilev1.PlatformRequest.ApplyTunnelConfiguration,
-    ) {
-        latestGeneration.updateAndGet { maxOf(it, req.generation) }
-
-        if (req.domain.isEmpty()) {
+        if (domain.isEmpty()) {
             completeError(requestID, "The domain is not set")
             return
         }
 
         val spec = try {
-            getTunnelSpec(req.configuration)
+            getTunnelSpec(cfg)
         } catch (err: InvalidTunnelConfigurationException) {
             completeError(requestID, err.message ?: "Invalid tunnel configuration")
             return
         }
 
         mutex.withLock {
-            establish(requestID, req, spec)
+            establish(requestID, domain, cfg.generation, spec)
         }
     }
 
-    private suspend fun establish(
-        requestID: Long,
-        req: Mobilev1.PlatformRequest.ApplyTunnelConfiguration,
-        spec: TunnelSpec,
-    ) {
-        if (req.generation < latestGeneration.get()) {
+    private suspend fun establish(requestID: Long, domain: String, generation: Long, spec: TunnelSpec) {
+        if (generation < latestGeneration.get()) {
             completeError(requestID, "The tunnel configuration is stale")
             return
         }
 
         val tun = try {
-            host.establish(req.domain, req.generation, spec)
+            host.establish(domain, generation, spec)
         } catch (err: Exception) {
             completeError(requestID, err.message ?: "Could not establish the tunnel")
             return
         }
 
-        val resp = Mobilev1.PlatformResponse.newBuilder()
-            .setApplyTunnelConfiguration(
-                Mobilev1.PlatformResponse.ApplyTunnelConfiguration.newBuilder()
-                    .setTunFD(tun.fd)
-            )
-            .build()
-
-        if (completer.complete(requestID, resp.toByteArray()) == 0) {
+        if (completer.complete(requestID, TunnelResponse.ApplyNetworkConfig(tun.fd)) == 0) {
             tun.commit()
         } else {
             tun.abort()
@@ -100,11 +68,6 @@ class PlatformRequestHandler(
     }
 
     private fun completeError(requestID: Long, message: String) {
-        completer.complete(requestID, getPlatformErrorResponse(message).toByteArray())
+        completer.complete(requestID, TunnelResponse.Error(TunnelError.PLATFORM, message))
     }
 }
-
-fun getPlatformErrorResponse(message: String): Mobilev1.PlatformResponse =
-    Mobilev1.PlatformResponse.newBuilder()
-        .setError(Mobilev1.PlatformResponse.Error.newBuilder().setMessage(message))
-        .build()

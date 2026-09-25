@@ -42,14 +42,16 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          repository: octelium/octelium
+          repository: octelium/liboctelium
           ref: main
-          path: octelium-source
+          path: liboctelium-source
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version-file: octelium-source/go.work
-          cache-dependency-path: octelium-source/client/liboctelium/go.sum
+      - name: Install Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -57,7 +59,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
       - name: Build the host libraries
         env:
-          OCTELIUM_SOURCE_DIR: ${{ github.workspace }}/octelium-source
+          LIBOCTELIUM_SOURCE_DIR: ${{ github.workspace }}/liboctelium-source
         run: ./scripts/build-host-libs.sh
       - name: Run the JNI integration tests
         run: ./gradlew --no-configuration-cache :app:testDebugUnitTest --tests 'com.octelium.client.lib.*'

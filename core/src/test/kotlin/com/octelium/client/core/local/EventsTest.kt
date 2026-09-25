@@ -1,13 +1,12 @@
 package com.octelium.client.core.local
 
-import com.google.protobuf.Timestamp
 import octelium.api.client.daemon.v1.Daemonv1
-import octelium.api.client.mobile.v1.Mobilev1
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.Instant
 import java.time.ZoneOffset
 
 class EventsTest {
@@ -15,8 +14,8 @@ class EventsTest {
     private fun getStatus(instanceID: String, revision: Long): Daemonv1.GetStatusResponse =
         Daemonv1.GetStatusResponse.newBuilder().setInstanceID(instanceID).setRevision(revision).build()
 
-    private fun getLog(msg: String): Mobilev1.Log =
-        Mobilev1.Log.newBuilder().setLevel(Mobilev1.Log.Level.INFO).setMessage(msg).build()
+    private fun getLog(msg: String, level: LogLevel = LogLevel.INFO): LogEntry =
+        LogEntry(level, Instant.ofEpochSecond(1790157723), msg)
 
     @Test
     fun testShouldReplaceStatus() {
@@ -64,44 +63,29 @@ class EventsTest {
     }
 
     @Test
-    fun testEventHandler() {
-        val statusStore = StatusStore()
-        val logStore = LogStore()
-        val received = mutableListOf<String>()
-        val h = EventHandler(statusStore, logStore) { received.add(it.message) }
+    fun testLogger() {
+        val received = mutableListOf<LogEntry>()
 
         run {
-            h.handle(Mobilev1.Event.newBuilder().setStatus(getStatus("a", 7)).build().toByteArray())
-            assertEquals(7L, statusStore.status.value?.revision)
+            val l = Logger(LogLevel.INFO) { received.add(it) }
+            l.debug("debug")
+            l.info("info")
+            l.warn("warn")
+            l.log(getLog("entry", LogLevel.ERROR))
+            l.log(getLog("debug entry", LogLevel.DEBUG))
         }
 
-        run {
-            h.handle(Mobilev1.Event.newBuilder().setLog(getLog("hello")).build().toByteArray())
-            assertEquals(listOf("hello"), logStore.logs.value.map { it.message })
-            assertEquals(listOf("hello"), received)
-        }
+        assertEquals(listOf("info", "warn", "entry"), received.map { it.message })
+        assertEquals(listOf(LogLevel.INFO, LogLevel.WARN, LogLevel.ERROR), received.map { it.level })
 
-        run {
-            h.handle(byteArrayOf(0xff.toByte(), 0x01))
-            h.handle(Mobilev1.Event.getDefaultInstance().toByteArray())
-            assertEquals(7L, statusStore.status.value?.revision)
-            assertEquals(1, logStore.logs.value.size)
-        }
+        received.clear()
+        Logger(LogLevel.DEBUG) { received.add(it) }.debug("debug")
+        assertEquals(listOf("debug"), received.map { it.message })
     }
 
     @Test
     fun testFormatLog() {
-        run {
-            val log = Mobilev1.Log.newBuilder()
-                .setLevel(Mobilev1.Log.Level.WARN)
-                .setMessage("Could not rebind")
-                .setCreatedAt(Timestamp.newBuilder().setSeconds(1790157723))
-                .build()
-            assertEquals("10:02:03 WARN  Could not rebind", formatLog(log, ZoneOffset.UTC))
-        }
-        run {
-            val log = Mobilev1.Log.newBuilder().setLevel(Mobilev1.Log.Level.ERROR).setMessage("failed").build()
-            assertEquals("--:--:-- ERROR failed", formatLog(log, ZoneOffset.UTC))
-        }
+        assertEquals("10:02:03 WARN  Could not rebind", formatLog(getLog("Could not rebind", LogLevel.WARN), ZoneOffset.UTC))
+        assertEquals("10:02:03 ERROR failed", formatLog(getLog("failed", LogLevel.ERROR), ZoneOffset.UTC))
     }
 }

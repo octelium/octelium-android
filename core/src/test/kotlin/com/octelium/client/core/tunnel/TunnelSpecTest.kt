@@ -1,6 +1,5 @@
 package com.octelium.client.core.tunnel
 
-import octelium.api.client.mobile.v1.Mobilev1
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -107,21 +106,33 @@ class TunnelSpecTest {
         assertEquals("0.0.0.0/0", parsePrefix("10.1.2.3/0").masked().toString())
     }
 
+    private fun getConfig(
+        addresses: List<String> = emptyList(),
+        routes: List<String> = emptyList(),
+        dns: DNSConfig? = null,
+        mtu: Int = 0,
+    ): NetworkConfig = NetworkConfig(
+        generation = 1,
+        addresses = addresses,
+        routes = routes,
+        dns = dns,
+        mtu = mtu,
+    )
+
     @Test
     fun testGetTunnelSpec() {
         run {
             val ret = getTunnelSpec(
-                Mobilev1.TunnelConfiguration.newBuilder()
-                    .addAddresses("fdee:1::5/128")
-                    .addRoutes("fdee:1::/64")
-                    .setMtu(1280)
-                    .setDns(
-                        Mobilev1.TunnelConfiguration.DNS.newBuilder()
-                            .addServers("fdee:1::53")
-                            .addSearchDomains("local.Example.com.")
-                            .addMatchDomains("local.example.com")
-                    )
-                    .build(),
+                getConfig(
+                    addresses = listOf("fdee:1::5/128"),
+                    routes = listOf("fdee:1::/64"),
+                    mtu = 1280,
+                    dns = DNSConfig(
+                        servers = listOf("fdee:1::53"),
+                        searchDomains = listOf("local.Example.com."),
+                        matchDomains = listOf("local.example.com"),
+                    ),
+                ),
             )
 
             assertEquals(listOf("fdee:1:0:0:0:0:0:5/128"), ret.addresses.map { it.toString() })
@@ -134,11 +145,10 @@ class TunnelSpecTest {
 
         run {
             val ret = getTunnelSpec(
-                Mobilev1.TunnelConfiguration.newBuilder()
-                    .addAddresses("10.1.2.3/32")
-                    .addRoutes("10.1.2.3/16")
-                    .addRoutes("10.1.0.0/16")
-                    .build(),
+                getConfig(
+                    addresses = listOf("10.1.2.3/32"),
+                    routes = listOf("10.1.2.3/16", "10.1.0.0/16"),
+                ),
             )
 
             assertEquals(listOf("10.1.0.0/16"), ret.routes.map { it.toString() })
@@ -150,18 +160,11 @@ class TunnelSpecTest {
 
         run {
             val ret = getTunnelSpec(
-                Mobilev1.TunnelConfiguration.newBuilder()
-                    .addAddresses("10.1.2.3/32")
-                    .addAddresses("fdee:1::5/128")
-                    .addRoutes("10.1.0.0/16")
-                    .addRoutes("fdee:1::/64")
-                    .setDns(
-                        Mobilev1.TunnelConfiguration.DNS.newBuilder()
-                            .addServers("10.1.0.53")
-                            .addServers("fdee:1::53")
-                            .setMatchAllDomains(true)
-                    )
-                    .build(),
+                getConfig(
+                    addresses = listOf("10.1.2.3/32", "fdee:1::5/128"),
+                    routes = listOf("10.1.0.0/16", "fdee:1::/64"),
+                    dns = DNSConfig(servers = listOf("10.1.0.53", "fdee:1::53"), matchAllDomains = true),
+                ),
             )
 
             assertEquals(2, ret.dnsServers.size)
@@ -170,21 +173,17 @@ class TunnelSpecTest {
 
         run {
             val ret = getTunnelSpec(
-                Mobilev1.TunnelConfiguration.newBuilder()
-                    .addAddresses("10.1.2.3/32")
-                    .setDns(Mobilev1.TunnelConfiguration.DNS.newBuilder().addSearchDomains("local.example.com"))
-                    .build(),
+                getConfig(
+                    addresses = listOf("10.1.2.3/32"),
+                    dns = DNSConfig(servers = emptyList(), searchDomains = listOf("local.example.com")),
+                ),
             )
             assertTrue(ret.searchDomains.isEmpty())
         }
 
         run {
             val ret = getTunnelSpec(
-                Mobilev1.TunnelConfiguration.newBuilder()
-                    .addAddresses("10.1.2.3/32")
-                    .addRoutes("10.1.0.0/16")
-                    .setMtu(576)
-                    .build(),
+                getConfig(addresses = listOf("10.1.2.3/32"), routes = listOf("10.1.0.0/16"), mtu = 576),
             )
             assertEquals(576, ret.mtu)
         }
@@ -193,78 +192,45 @@ class TunnelSpecTest {
     @Test
     fun testGetTunnelSpecErrors() {
         assertInvalid("The tunnel configuration has no addresses") {
-            getTunnelSpec(Mobilev1.TunnelConfiguration.newBuilder().addRoutes("10.1.0.0/16").build())
+            getTunnelSpec(getConfig(routes = listOf("10.1.0.0/16")))
         }
 
         assertInvalid("Default routes are not supported: 0.0.0.0/0") {
-            getTunnelSpec(
-                Mobilev1.TunnelConfiguration.newBuilder()
-                    .addAddresses("10.1.2.3/32")
-                    .addRoutes("0.0.0.0/0")
-                    .build(),
-            )
+            getTunnelSpec(getConfig(addresses = listOf("10.1.2.3/32"), routes = listOf("0.0.0.0/0")))
         }
 
         assertInvalid("Default routes are not supported: 0:0:0:0:0:0:0:0/0") {
-            getTunnelSpec(
-                Mobilev1.TunnelConfiguration.newBuilder()
-                    .addAddresses("fdee::5/128")
-                    .addRoutes("::/0")
-                    .build(),
-            )
+            getTunnelSpec(getConfig(addresses = listOf("fdee::5/128"), routes = listOf("::/0")))
         }
 
         assertInvalid("Invalid MTU: 100") {
-            getTunnelSpec(
-                Mobilev1.TunnelConfiguration.newBuilder()
-                    .addAddresses("10.1.2.3/32")
-                    .setMtu(100)
-                    .build(),
-            )
+            getTunnelSpec(getConfig(addresses = listOf("10.1.2.3/32"), mtu = 100))
         }
 
         assertInvalid("The MTU 1279 is lower than the minimum IPv6 MTU of 1280") {
-            getTunnelSpec(
-                Mobilev1.TunnelConfiguration.newBuilder()
-                    .addAddresses("fdee:1::5/128")
-                    .setMtu(1279)
-                    .build(),
-            )
+            getTunnelSpec(getConfig(addresses = listOf("fdee:1::5/128"), mtu = 1279))
         }
 
         assertInvalid("The MTU 576 is lower than the minimum IPv6 MTU of 1280") {
-            getTunnelSpec(
-                Mobilev1.TunnelConfiguration.newBuilder()
-                    .addAddresses("10.1.2.3/32")
-                    .addRoutes("fdee:1::/64")
-                    .setMtu(576)
-                    .build(),
-            )
+            getTunnelSpec(getConfig(addresses = listOf("10.1.2.3/32"), routes = listOf("fdee:1::/64"), mtu = 576))
         }
 
         assertInvalid("Invalid prefix: 10.1.2.3") {
-            getTunnelSpec(Mobilev1.TunnelConfiguration.newBuilder().addAddresses("10.1.2.3").build())
+            getTunnelSpec(getConfig(addresses = listOf("10.1.2.3")))
         }
 
         assertInvalid("Invalid IP address: dns.example.com") {
             getTunnelSpec(
-                Mobilev1.TunnelConfiguration.newBuilder()
-                    .addAddresses("10.1.2.3/32")
-                    .setDns(Mobilev1.TunnelConfiguration.DNS.newBuilder().addServers("dns.example.com"))
-                    .build(),
+                getConfig(addresses = listOf("10.1.2.3/32"), dns = DNSConfig(servers = listOf("dns.example.com"))),
             )
         }
 
         assertInvalid("Invalid search domain: local example.com") {
             getTunnelSpec(
-                Mobilev1.TunnelConfiguration.newBuilder()
-                    .addAddresses("10.1.2.3/32")
-                    .setDns(
-                        Mobilev1.TunnelConfiguration.DNS.newBuilder()
-                            .addServers("10.1.0.53")
-                            .addSearchDomains("local example.com")
-                    )
-                    .build(),
+                getConfig(
+                    addresses = listOf("10.1.2.3/32"),
+                    dns = DNSConfig(servers = listOf("10.1.0.53"), searchDomains = listOf("local example.com")),
+                ),
             )
         }
     }

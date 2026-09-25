@@ -1,6 +1,7 @@
 package com.octelium.client.core.security
 
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.security.SecureRandom
 import java.util.UUID
@@ -91,7 +92,10 @@ fun writeAtomically(file: File, data: ByteArray) {
     file.parentFile?.mkdirs()
 
     val tmp = File(file.parentFile, ".${file.name}.tmp")
-    tmp.writeBytes(data)
+    FileOutputStream(tmp).use {
+        it.write(data)
+        it.fd.sync()
+    }
 
     if (!tmp.renameTo(file)) {
         tmp.delete()

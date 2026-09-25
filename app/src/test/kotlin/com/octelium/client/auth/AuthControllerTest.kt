@@ -1,7 +1,6 @@
 package com.octelium.client.auth
 
 import com.octelium.client.core.local.LocalClient
-import com.octelium.client.core.local.LocalTransport
 import com.octelium.client.core.local.StatusStore
 import com.octelium.client.core.local.getStatusException
 import com.octelium.client.core.network.HostResolver
@@ -10,7 +9,6 @@ import io.grpc.Status
 import io.grpc.StatusException
 import kotlinx.coroutines.test.runTest
 import octelium.api.client.daemon.v1.Daemonv1
-import octelium.api.client.mobile.v1.Mobilev1
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -21,7 +19,7 @@ class AuthControllerTest {
 
     private val callbackURL = "com.octelium.client:/callback/success"
 
-    private class FakeDaemon : LocalTransport {
+    private class FakeDaemon : LocalClient {
         val calls = mutableListOf<String>()
         val waiting = linkedMapOf<String, String>()
         val validOperationID = mutableSetOf<String>()
@@ -36,15 +34,22 @@ class AuthControllerTest {
                 .setState(state)
                 .build()
 
-        override suspend fun call(method: String, request: ByteArray): ByteArray = when (method.also { calls.add(it) }) {
-            "Authenticate" -> {
-                val req = Daemonv1.AuthenticateRequest.parseFrom(request)
-                val id = "op-${nextID++}"
-                waiting[id] = req.domain
-                getOperation(id, req.domain, Daemonv1.Operation.State.WAITING_FOR_USER).toByteArray()
-            }
+        private fun authenticate(domain: String): Daemonv1.Operation {
+            calls.add("Authenticate")
+            val id = "op-${nextID++}"
+            waiting[id] = domain
+            return getOperation(id, domain, Daemonv1.Operation.State.WAITING_FOR_USER)
+        }
 
-            "GetStatus" -> Daemonv1.GetStatusResponse.newBuilder()
+        private fun unimplemented(method: String): Nothing {
+            calls.add(method)
+            throw getStatusException(Status.Code.UNIMPLEMENTED.value(), method)
+        }
+
+        override suspend fun getStatus(): Daemonv1.GetStatusResponse {
+            calls.add("GetStatus")
+
+            return Daemonv1.GetStatusResponse.newBuilder()
                 .setRevision(nextID.toLong())
                 .addAllDomains(
                     waiting.map { (id, domain) ->
@@ -55,21 +60,47 @@ class AuthControllerTest {
                     },
                 )
                 .build()
-                .toByteArray()
+        }
 
-            "CompleteAuthentication" -> {
-                val req = Mobilev1.CompleteAuthenticationRequest.parseFrom(request)
-                completed.add(req.operationID to req.callbackURL)
+        override suspend fun authenticateBrowser(domain: String): Daemonv1.Operation = authenticate(domain)
 
-                if (!validOperationID.contains(req.operationID)) {
-                    throw getStatusException(Status.Code.INVALID_ARGUMENT.value(), "Invalid authentication callback URL")
-                }
+        override suspend fun authenticateToken(domain: String, authenticationToken: String): Daemonv1.Operation =
+            authenticate(domain)
 
-                val domain = waiting.remove(req.operationID)!!
-                getOperation(req.operationID, domain, Daemonv1.Operation.State.RUNNING).toByteArray()
+        override suspend fun completeAuthentication(operationID: String, callbackURL: String): Daemonv1.Operation {
+            calls.add("CompleteAuthentication")
+            completed.add(operationID to callbackURL)
+
+            if (!validOperationID.contains(operationID)) {
+                throw getStatusException(Status.Code.INVALID_ARGUMENT.value(), "Invalid authentication callback URL")
             }
 
-            else -> throw getStatusException(Status.Code.UNIMPLEMENTED.value(), method)
+            val domain = waiting.remove(operationID)!!
+            return getOperation(operationID, domain, Daemonv1.Operation.State.RUNNING)
+        }
+
+        override suspend fun connect(domain: String): Daemonv1.Operation = unimplemented("Connect")
+
+        override suspend fun disconnect(domain: String): Daemonv1.Operation = unimplemented("Disconnect")
+
+        override suspend fun logout(domain: String): Daemonv1.Operation = unimplemented("Logout")
+
+        override suspend fun deleteDomain(domain: String): Daemonv1.Operation = unimplemented("DeleteDomain")
+
+        override suspend fun getOperation(id: String): Daemonv1.Operation = unimplemented("GetOperation")
+
+        override suspend fun cancelOperation(id: String): Daemonv1.Operation = unimplemented("CancelOperation")
+
+        override suspend fun getAPICredential(domain: String): Daemonv1.GetAPICredentialResponse =
+            unimplemented("GetAPICredential")
+
+        override suspend fun updateDomainSettings(
+            domain: String,
+            settings: Daemonv1.DomainSettings,
+        ): Daemonv1.DomainSettings = unimplemented("UpdateDomainSettings")
+
+        override suspend fun setNetworkState(isAvailable: Boolean, id: String) {
+            unimplemented("SetNetworkState")
         }
     }
 
@@ -78,8 +109,7 @@ class AuthControllerTest {
         statusStore: StatusStore = StatusStore(),
         hosts: HostResolver? = null,
     ): AuthController = AuthController(
-        getClient = { LocalClient(daemon) },
-        getInfo = { Mobilev1.GetInfoResponse.newBuilder().setAuthenticationCallbackURL(callbackURL).build() },
+        getClient = { daemon },
         statusStore = statusStore,
         hosts = hosts,
     )

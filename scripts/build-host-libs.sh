@@ -3,12 +3,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOURCE_DIR="${OCTELIUM_SOURCE_DIR:-${ROOT}/../octelium}"
+SOURCE_DIR="${LIBOCTELIUM_SOURCE_DIR:-${ROOT}/../liboctelium}"
 OUT_DIR="${OCTELIUM_HOST_LIB_DIR:-${ROOT}/build/host-libs}"
 
-if [ ! -f "${SOURCE_DIR}/client/liboctelium/capi.go" ]; then
-  echo "Could not find liboctelium at ${SOURCE_DIR}/client/liboctelium" >&2
-  echo "Set OCTELIUM_SOURCE_DIR to the root of the Octelium repository" >&2
+if [ ! -f "${SOURCE_DIR}/include/octelium.h" ]; then
+  echo "Could not find liboctelium at ${SOURCE_DIR}" >&2
+  echo "Set LIBOCTELIUM_SOURCE_DIR to the root of the liboctelium repository" >&2
+  exit 1
+fi
+
+if ! cmp -s "${SOURCE_DIR}/include/octelium.h" "${ROOT}/app/src/main/cpp/octelium.h"; then
+  echo "app/src/main/cpp/octelium.h differs from ${SOURCE_DIR}/include/octelium.h" >&2
+  echo "Copy the C header of the liboctelium revision that is built" >&2
   exit 1
 fi
 
@@ -20,9 +26,11 @@ fi
 case "$(uname -s)" in
   Linux)
     JNI_PLATFORM="linux"
+    LIB_NAME="liboctelium.so"
     ;;
   Darwin)
     JNI_PLATFORM="darwin"
+    LIB_NAME="liboctelium.dylib"
     ;;
   *)
     echo "Unsupported host: $(uname -s)" >&2
@@ -32,16 +40,12 @@ esac
 
 mkdir -p "${OUT_DIR}"
 
-(
-  cd "${SOURCE_DIR}"
-  CGO_ENABLED=1 go build -trimpath -buildvcs=false -buildmode=c-shared \
-    -o "${OUT_DIR}/liboctelium.so" github.com/octelium/octelium/client/liboctelium
-)
+cargo build --release --lib --manifest-path "${SOURCE_DIR}/Cargo.toml"
+
+cp "${SOURCE_DIR}/target/release/${LIB_NAME}" "${OUT_DIR}/liboctelium.so"
 
 "${CC:-cc}" -shared -fPIC -O2 -Wall -Wextra -Werror \
   -I"${JAVA_HOME}/include" -I"${JAVA_HOME}/include/${JNI_PLATFORM}" \
   -o "${OUT_DIR}/liboctelium_jni.so" "${ROOT}/app/src/main/cpp/octelium_jni.c" -ldl -lpthread
-
-rm -f "${OUT_DIR}/liboctelium.h"
 
 echo "Built the host libraries into ${OUT_DIR}"

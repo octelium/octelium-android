@@ -40,13 +40,13 @@ class AppContainer(
     val logStore = LogStore()
     val prefs = preferences ?: PrefsRepository(context)
     val tunnels = TunnelManager(context)
+    private val channelFactory = channels ?: ChannelFactory(::newClusterChannel)
     val runtime: ClientRuntime = getRuntime?.invoke(this)
-        ?: OcteliumRuntime(context, scope, statusStore, logStore, tunnels)
+        ?: OcteliumRuntime(context, scope, statusStore, logStore, tunnels, channelFactory)
     val network = NetworkMonitor(context, scope, runtime)
     val hosts: HostResolver = resolver ?: SystemHostResolver(context)
     val auth = AuthController(
         getClient = { runtime.awaitClient() },
-        getInfo = { runtime.awaitInfo() },
         statusStore = statusStore,
         hosts = hosts,
     )
@@ -54,7 +54,7 @@ class AppContainer(
 
     val cluster = ClusterClient(
         credentials = { runtime.awaitClient().getAPICredential(it) },
-        channels = channels ?: ChannelFactory(::newClusterChannel),
+        channels = channelFactory,
     )
 
     fun start() {

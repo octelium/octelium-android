@@ -38,8 +38,8 @@ android {
         }
 
         buildConfigField("String", "RELEASE_TAG", toBuildConfigString(releaseTag))
-        buildConfigField("String", "LIBOCTELIUM_COMMIT", toBuildConfigString(readLibInfo("OCTELIUM_COMMIT")))
-        buildConfigField("String", "LIBOCTELIUM_REF", toBuildConfigString(readLibInfo("OCTELIUM_REF")))
+        buildConfigField("String", "LIBOCTELIUM_COMMIT", toBuildConfigString(readLibInfo("LIBOCTELIUM_COMMIT")))
+        buildConfigField("String", "LIBOCTELIUM_REF", toBuildConfigString(readLibInfo("LIBOCTELIUM_REF")))
     }
 
     buildFeatures {

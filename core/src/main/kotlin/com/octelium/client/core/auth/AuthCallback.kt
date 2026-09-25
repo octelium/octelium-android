@@ -7,6 +7,10 @@ import java.net.URISyntaxException
 
 const val MAX_CALLBACK_URL_LENGTH = 16 * 1024
 
+const val AUTH_CALLBACK_SCHEME = "com.octelium.client"
+const val AUTH_CALLBACK_PATH = "/callback/success"
+const val AUTH_CALLBACK_URL = "$AUTH_CALLBACK_SCHEME:$AUTH_CALLBACK_PATH"
+
 private fun parseURI(arg: String): URI? = try {
     URI(arg)
 } catch (err: URISyntaxException) {

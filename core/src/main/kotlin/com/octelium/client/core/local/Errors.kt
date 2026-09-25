@@ -4,10 +4,6 @@ import io.grpc.Status
 import io.grpc.StatusException
 import io.grpc.StatusRuntimeException
 
-interface LocalTransport {
-    suspend fun call(method: String, request: ByteArray): ByteArray
-}
-
 fun getStatusException(code: Int, message: String): StatusException {
     val status = if (code in 1..16) {
         Status.fromCodeValue(code)

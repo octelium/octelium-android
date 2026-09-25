@@ -5,7 +5,6 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
-import octelium.api.client.mobile.v1.Mobilev1
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -43,46 +42,44 @@ class PlatformRequestsTest {
     }
 
     private class FakeCompleter(private val code: Int = 0) : RequestCompleter {
-        val responses = mutableListOf<Pair<Long, Mobilev1.PlatformResponse>>()
+        val responses = mutableListOf<Pair<Long, TunnelResponse>>()
 
-        override fun complete(requestID: Long, response: ByteArray): Int {
-            responses.add(requestID to Mobilev1.PlatformResponse.parseFrom(response))
+        override fun complete(requestID: Long, response: TunnelResponse): Int {
+            responses.add(requestID to response)
             return code
         }
     }
 
-    private fun getRequest(
-        domain: String = "example.com",
+    private fun getConfig(
         generation: Long = 1,
-        cfg: Mobilev1.TunnelConfiguration = Mobilev1.TunnelConfiguration.newBuilder()
-            .addAddresses("10.1.2.3/32")
-            .addRoutes("10.1.0.0/16")
-            .setMtu(1280)
-            .build(),
-    ): ByteArray = Mobilev1.PlatformRequest.newBuilder()
-        .setApplyTunnelConfiguration(
-            Mobilev1.PlatformRequest.ApplyTunnelConfiguration.newBuilder()
-                .setDomain(domain)
-                .setGeneration(generation)
-                .setConfiguration(cfg)
-        )
-        .build()
-        .toByteArray()
+        addresses: List<String> = listOf("10.1.2.3/32"),
+        routes: List<String> = listOf("10.1.0.0/16"),
+    ): NetworkConfig = NetworkConfig(
+        generation = generation,
+        addresses = addresses,
+        routes = routes,
+        dns = null,
+        mtu = 1280,
+    )
+
+    private fun getErrorMessage(arg: TunnelResponse): String {
+        assertTrue(arg is TunnelResponse.Error)
+        assertEquals(TunnelError.PLATFORM, (arg as TunnelResponse.Error).error)
+        return arg.message
+    }
 
     @Test
-    fun testApplyTunnelConfiguration() = runTest {
+    fun testApplyNetworkConfig() = runTest {
         val host = FakeHost()
         val completer = FakeCompleter()
         val h = PlatformRequestHandler(host, completer)
 
-        h.handle(7, getRequest(generation = 3))
+        h.applyNetworkConfig(7, "example.com", getConfig(generation = 3))
 
         assertEquals(1, completer.responses.size)
         val (id, resp) = completer.responses.single()
         assertEquals(7L, id)
-        assertTrue(resp.hasApplyTunnelConfiguration())
-        assertTrue(resp.applyTunnelConfiguration.hasTunFD())
-        assertEquals(100, resp.applyTunnelConfiguration.tunFD)
+        assertEquals(TunnelResponse.ApplyNetworkConfig(100), resp)
 
         val (domain, generation, spec) = host.specs.single()
         assertEquals("example.com", domain)
@@ -97,9 +94,9 @@ class PlatformRequestsTest {
     @Test
     fun testCompleteFailed() = runTest {
         val host = FakeHost()
-        val h = PlatformRequestHandler(host, FakeCompleter(code = 5))
+        val h = PlatformRequestHandler(host, FakeCompleter(code = 3))
 
-        h.handle(7, getRequest())
+        h.applyNetworkConfig(7, "example.com", getConfig())
 
         assertFalse(host.tunnels.single().isCommitted)
         assertTrue(host.tunnels.single().isAborted)
@@ -111,15 +108,15 @@ class PlatformRequestsTest {
         val completer = FakeCompleter()
         val h = PlatformRequestHandler(host, completer)
 
-        h.handle(1, getRequest(generation = 5))
-        h.handle(2, getRequest(generation = 3))
-        h.handle(3, getRequest(generation = 6))
+        h.applyNetworkConfig(1, "example.com", getConfig(generation = 5))
+        h.applyNetworkConfig(2, "example.com", getConfig(generation = 3))
+        h.applyNetworkConfig(3, "example.com", getConfig(generation = 6))
 
         assertEquals(listOf(5L, 6L), host.specs.map { it.second })
         assertEquals(listOf(1L, 2L, 3L), completer.responses.map { it.first })
-        assertTrue(completer.responses[0].second.hasApplyTunnelConfiguration())
-        assertEquals("The tunnel configuration is stale", completer.responses[1].second.error.message)
-        assertTrue(completer.responses[2].second.hasApplyTunnelConfiguration())
+        assertTrue(completer.responses[0].second is TunnelResponse.ApplyNetworkConfig)
+        assertEquals("The tunnel configuration is stale", getErrorMessage(completer.responses[1].second))
+        assertTrue(completer.responses[2].second is TunnelResponse.ApplyNetworkConfig)
     }
 
     @Test
@@ -130,7 +127,7 @@ class PlatformRequestsTest {
         val h = PlatformRequestHandler(host, completer)
 
         for (generation in 1L..3L) {
-            launch { h.handle(generation, getRequest(generation = generation)) }
+            launch { h.applyNetworkConfig(generation, "example.com", getConfig(generation = generation)) }
         }
         advanceUntilIdle()
 
@@ -142,58 +139,36 @@ class PlatformRequestsTest {
 
         assertEquals(listOf(1L, 3L), host.specs.map { it.second })
         assertEquals(listOf(1L, 2L, 3L), completer.responses.map { it.first })
-        assertEquals("The tunnel configuration is stale", completer.responses[1].second.error.message)
-        assertTrue(completer.responses[2].second.hasApplyTunnelConfiguration())
+        assertEquals("The tunnel configuration is stale", getErrorMessage(completer.responses[1].second))
+        assertTrue(completer.responses[2].second is TunnelResponse.ApplyNetworkConfig)
     }
 
     @Test
     fun testErrors() = runTest {
         run {
-            val completer = FakeCompleter()
-            PlatformRequestHandler(FakeHost(), completer).handle(1, byteArrayOf(0xff.toByte(), 0xff.toByte()))
-            assertTrue(completer.responses.single().second.hasError())
-            assertTrue(
-                completer.responses.single().second.error.message.startsWith("Could not unmarshal the platform request"),
-            )
-        }
-
-        run {
-            val completer = FakeCompleter()
-            PlatformRequestHandler(FakeHost(), completer).handle(1, ByteArray(0))
-            assertEquals("Unsupported platform request: TYPE_NOT_SET", completer.responses.single().second.error.message)
-        }
-
-        run {
             val host = FakeHost()
             val completer = FakeCompleter()
-            PlatformRequestHandler(host, completer).handle(
+            PlatformRequestHandler(host, completer).applyNetworkConfig(
                 2,
-                getRequest(cfg = Mobilev1.TunnelConfiguration.newBuilder().addAddresses("10.1.2.3/32").addRoutes("0.0.0.0/0").build()),
+                "example.com",
+                getConfig(routes = listOf("0.0.0.0/0")),
             )
             assertEquals(2L, completer.responses.single().first)
-            assertEquals("Default routes are not supported: 0.0.0.0/0", completer.responses.single().second.error.message)
+            assertEquals("Default routes are not supported: 0.0.0.0/0", getErrorMessage(completer.responses.single().second))
             assertTrue(host.tunnels.isEmpty())
         }
 
         run {
             val completer = FakeCompleter()
-            PlatformRequestHandler(FakeHost(), completer).handle(3, getRequest(domain = ""))
-            assertEquals("The domain is not set", completer.responses.single().second.error.message)
+            PlatformRequestHandler(FakeHost(), completer).applyNetworkConfig(3, "", getConfig())
+            assertEquals("The domain is not set", getErrorMessage(completer.responses.single().second))
         }
 
         run {
             val completer = FakeCompleter()
             PlatformRequestHandler(FakeHost(IllegalStateException("The VPN permission is not granted")), completer)
-                .handle(4, getRequest())
-            assertEquals("The VPN permission is not granted", completer.responses.single().second.error.message)
+                .applyNetworkConfig(4, "example.com", getConfig())
+            assertEquals("The VPN permission is not granted", getErrorMessage(completer.responses.single().second))
         }
-    }
-
-    @Test
-    fun testGetPlatformErrorResponse() {
-        val ret = getPlatformErrorResponse("failed")
-        assertTrue(ret.hasError())
-        assertEquals("failed", ret.error.message)
-        assertEquals(Mobilev1.PlatformResponse.TypeCase.ERROR, ret.typeCase)
     }
 }

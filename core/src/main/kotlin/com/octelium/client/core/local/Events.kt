@@ -1,12 +1,10 @@
 package com.octelium.client.core.local
 
-import com.google.protobuf.InvalidProtocolBufferException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import octelium.api.client.daemon.v1.Daemonv1
-import octelium.api.client.mobile.v1.Mobilev1
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -34,14 +32,50 @@ fun shouldReplaceStatus(cur: Daemonv1.GetStatusResponse?, next: Daemonv1.GetStat
     return next.revision >= cur.revision
 }
 
+enum class LogLevel {
+    DEBUG,
+    INFO,
+    WARN,
+    ERROR,
+}
+
+data class LogEntry(
+    val level: LogLevel,
+    val createdAt: Instant,
+    val message: String,
+)
+
+class Logger(
+    private val level: LogLevel = LogLevel.INFO,
+    private val sink: (LogEntry) -> Unit = {},
+) {
+    fun debug(message: String) = log(LogLevel.DEBUG, message)
+
+    fun info(message: String) = log(LogLevel.INFO, message)
+
+    fun warn(message: String) = log(LogLevel.WARN, message)
+
+    fun error(message: String) = log(LogLevel.ERROR, message)
+
+    fun log(level: LogLevel, message: String) {
+        log(LogEntry(level, Instant.now(), message))
+    }
+
+    fun log(entry: LogEntry) {
+        if (entry.level >= level) {
+            sink(entry)
+        }
+    }
+}
+
 class LogStore(private val capacity: Int = DEFAULT_LOG_CAPACITY) {
     private val lock = Any()
-    private val buffer = ArrayDeque<Mobilev1.Log>()
+    private val buffer = ArrayDeque<LogEntry>()
 
-    private val _logs = MutableStateFlow<List<Mobilev1.Log>>(emptyList())
-    val logs: StateFlow<List<Mobilev1.Log>> = _logs.asStateFlow()
+    private val _logs = MutableStateFlow<List<LogEntry>>(emptyList())
+    val logs: StateFlow<List<LogEntry>> = _logs.asStateFlow()
 
-    fun add(log: Mobilev1.Log) {
+    fun add(log: LogEntry) {
         synchronized(lock) {
             buffer.addLast(log)
             while (buffer.size > capacity) {
@@ -63,38 +97,8 @@ class LogStore(private val capacity: Int = DEFAULT_LOG_CAPACITY) {
     }
 }
 
-class EventHandler(
-    private val statusStore: StatusStore,
-    private val logStore: LogStore,
-    private val onLog: (Mobilev1.Log) -> Unit = {},
-) {
-    fun handle(data: ByteArray) {
-        val ev = try {
-            Mobilev1.Event.parseFrom(data)
-        } catch (err: InvalidProtocolBufferException) {
-            return
-        }
-
-        when (ev.typeCase) {
-            Mobilev1.Event.TypeCase.STATUS -> statusStore.update(ev.status)
-            Mobilev1.Event.TypeCase.LOG -> {
-                logStore.add(ev.log)
-                onLog(ev.log)
-            }
-
-            else -> {}
-        }
-    }
-}
-
-fun formatLog(arg: Mobilev1.Log, zone: ZoneId = ZoneId.systemDefault()): String {
-    val at = if (arg.hasCreatedAt()) {
-        DateTimeFormatter.ofPattern("HH:mm:ss")
-            .withZone(zone)
-            .format(Instant.ofEpochSecond(arg.createdAt.seconds, arg.createdAt.nanos.toLong()))
-    } else {
-        "--:--:--"
-    }
+fun formatLog(arg: LogEntry, zone: ZoneId = ZoneId.systemDefault()): String {
+    val at = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(zone).format(arg.createdAt)
 
     return "$at ${arg.level.name.padEnd(5)} ${arg.message}"
 }

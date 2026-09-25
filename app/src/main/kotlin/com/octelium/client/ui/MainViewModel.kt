@@ -130,7 +130,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             _authCallbackError.value = null
 
-            if (!runCatching { container.auth.isCallbackURL(url) }.getOrDefault(false)) {
+            if (!container.auth.isCallbackURL(url)) {
                 return@launch
             }
 

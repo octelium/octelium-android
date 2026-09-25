@@ -1,6 +1,5 @@
 package com.octelium.client.core.tunnel
 
-import octelium.api.client.mobile.v1.Mobilev1
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
@@ -172,13 +171,13 @@ fun parsePrefix(arg: String): IPPrefix {
     return IPPrefix(address, prefixLength)
 }
 
-fun getTunnelSpec(cfg: Mobilev1.TunnelConfiguration): TunnelSpec {
-    val addresses = cfg.addressesList.map { parsePrefix(it) }
+fun getTunnelSpec(cfg: NetworkConfig): TunnelSpec {
+    val addresses = cfg.addresses.map { parsePrefix(it) }
     if (addresses.isEmpty()) {
         throw InvalidTunnelConfigurationException("The tunnel configuration has no addresses")
     }
 
-    val routes = cfg.routesList.map { parsePrefix(it).masked() }.distinct()
+    val routes = cfg.routes.map { parsePrefix(it).masked() }.distinct()
     routes.find { it.prefixLength == 0 }?.let {
         throw InvalidTunnelConfigurationException("Default routes are not supported: $it")
     }
@@ -187,10 +186,10 @@ fun getTunnelSpec(cfg: Mobilev1.TunnelConfiguration): TunnelSpec {
         throw InvalidTunnelConfigurationException("Invalid MTU: ${cfg.mtu}")
     }
 
-    val dnsServers = if (cfg.hasDns()) cfg.dns.serversList.map { parseIP(it) } else emptyList()
+    val dnsServers = cfg.dns?.servers.orEmpty().map { parseIP(it) }
 
-    val searchDomains = if (cfg.hasDns() && dnsServers.isNotEmpty()) {
-        cfg.dns.searchDomainsList.map { it.trim().trimEnd('.').lowercase() }.onEach {
+    val searchDomains = if (cfg.dns != null && dnsServers.isNotEmpty()) {
+        cfg.dns.searchDomains.map { it.trim().trimEnd('.').lowercase() }.onEach {
             if (!rgxSearchDomain.matches(it)) {
                 throw InvalidTunnelConfigurationException("Invalid search domain: $it")
             }

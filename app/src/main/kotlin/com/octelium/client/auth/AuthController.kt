@@ -1,5 +1,6 @@
 package com.octelium.client.auth
 
+import com.octelium.client.core.auth.AUTH_CALLBACK_URL
 import com.octelium.client.core.auth.getAuthCallbackCandidates
 import com.octelium.client.core.auth.isAuthCallbackURL
 import com.octelium.client.core.cluster.getClusterAPIHost
@@ -10,11 +11,9 @@ import com.octelium.client.core.network.getHostCheckError
 import io.grpc.Status
 import io.grpc.StatusException
 import octelium.api.client.daemon.v1.Daemonv1.Operation
-import octelium.api.client.mobile.v1.Mobilev1
 
 class AuthController(
     private val getClient: suspend () -> LocalClient,
-    private val getInfo: suspend () -> Mobilev1.GetInfoResponse,
     private val statusStore: StatusStore,
     private val hosts: HostResolver? = null,
 ) {
@@ -40,7 +39,7 @@ class AuthController(
         return ret
     }
 
-    suspend fun isCallbackURL(url: String): Boolean = isAuthCallbackURL(url, getInfo().authenticationCallbackURL)
+    fun isCallbackURL(url: String): Boolean = isAuthCallbackURL(url, AUTH_CALLBACK_URL)
 
     suspend fun completeAuthentication(url: String): Operation {
         if (!isCallbackURL(url)) {

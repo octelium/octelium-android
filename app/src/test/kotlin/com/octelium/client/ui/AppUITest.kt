@@ -208,6 +208,33 @@ class AppUITest {
     }
 
     @Test
+    fun testSessionExpired() {
+        val daemon = launch(listOf(getAuthenticatedDomain("example.com", ConnectionStatus.State.CONNECTED)))
+
+        waitForText("Tunnel")
+        composeRule.onNodeWithText("Signed in").assertExists()
+
+        daemon.setDomain(
+            getLoggedOutDomain("example.com").toBuilder()
+                .setLastError(
+                    Daemonv1.Error.newBuilder()
+                        .setCode(Daemonv1.Error.Code.AUTHENTICATION_REQUIRED)
+                        .setMessage("Interactive authentication is not available in this mode. Please authenticate yourself first")
+                )
+                .build(),
+        )
+
+        waitForText("Sign in to example.com")
+        composeRule.onNodeWithText("Sign in required").assertExists()
+        composeRule.onNodeWithText("Your credentials are no longer usable. Sign in to the Cluster again.").assertExists()
+        composeRule.onNodeWithText("Continue in browser").assertExists()
+        assertTrue(composeRule.onAllNodesWithText("Signed in").fetchSemanticsNodes().isEmpty())
+        assertTrue(composeRule.onAllNodesWithText("Your Cluster credentials are ready").fetchSemanticsNodes().isEmpty())
+        assertTrue(composeRule.onAllNodesWithText("Try again").fetchSemanticsNodes().isEmpty())
+        capture("connection-session-expired")
+    }
+
+    @Test
     fun testServices() {
         launch(listOf(getAuthenticatedDomain("example.com", ConnectionStatus.State.CONNECTED)))
 

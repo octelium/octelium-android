@@ -1,16 +1,23 @@
 package com.octelium.client.lib
 
 import com.google.protobuf.ByteString
-import com.octelium.client.core.local.LocalClient
-import com.octelium.client.core.local.checkInfo
-import com.octelium.client.core.tunnel.getPlatformErrorResponse
-import io.grpc.Status
-import io.grpc.StatusException
-import kotlinx.coroutines.runBlocking
-import octelium.api.client.daemon.v1.Daemonv1
-import octelium.api.client.mobile.v1.Mobilev1
+import com.octelium.client.core.local.LogEntry
+import com.octelium.client.core.local.LogLevel
+import com.octelium.client.core.tunnel.DNSMode
+import com.octelium.client.core.tunnel.NetworkConfig
+import com.octelium.client.core.tunnel.TunnelConfig
+import com.octelium.client.core.tunnel.TunnelError
+import com.octelium.client.core.tunnel.TunnelException
+import com.octelium.client.core.tunnel.TunnelHandler
+import com.octelium.client.core.tunnel.TunnelMode
+import com.octelium.client.core.tunnel.TunnelPreferences
+import com.octelium.client.core.tunnel.TunnelRequest
+import com.octelium.client.core.tunnel.TunnelResponse
+import com.octelium.client.core.tunnel.TunnelState
+import com.octelium.client.core.tunnel.TunnelStatus
+import octelium.api.main.meta.v1.Metav1
+import octelium.api.main.user.v1.Userv1
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
@@ -19,7 +26,8 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
-import java.util.UUID
+import java.io.FileDescriptor
+import java.io.RandomAccessFile
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -30,29 +38,37 @@ class LibOcteliumTest {
 
     private val libDir = File(System.getProperty("octelium.hostLibDir").orEmpty())
 
-    private class Callbacks : NativeCallbacks {
-        val events = LinkedBlockingQueue<Mobilev1.Event>()
-        val requests = LinkedBlockingQueue<Pair<Long, Mobilev1.PlatformRequest>>()
+    private class Handler : TunnelHandler {
+        val statuses = LinkedBlockingQueue<TunnelStatus>()
+        val logs = LinkedBlockingQueue<LogEntry>()
+        val requests = LinkedBlockingQueue<Pair<Long, TunnelRequest>>()
 
-        override fun onEvent(data: ByteArray) {
-            events.add(Mobilev1.Event.parseFrom(data))
+        override fun onStatus(status: TunnelStatus) {
+            statuses.add(status)
         }
 
-        override fun onRequest(requestID: Long, data: ByteArray) {
-            requests.add(requestID to Mobilev1.PlatformRequest.parseFrom(data))
+        override fun onLog(log: LogEntry) {
+            logs.add(log)
         }
 
-        fun awaitStatus(fn: (Daemonv1.GetStatusResponse) -> Boolean): Daemonv1.GetStatusResponse {
+        override fun onRequest(requestID: Long, request: TunnelRequest) {
+            requests.add(requestID to request)
+        }
+
+        fun awaitStatus(fn: (TunnelStatus) -> Boolean): TunnelStatus {
             val deadline = System.currentTimeMillis() + 10_000
             while (System.currentTimeMillis() < deadline) {
-                val ev = events.poll(100, TimeUnit.MILLISECONDS) ?: continue
-                if (ev.hasStatus() && fn(ev.status)) {
-                    return ev.status
+                val ret = statuses.poll(100, TimeUnit.MILLISECONDS) ?: continue
+                if (fn(ret)) {
+                    return ret
                 }
             }
 
             throw AssertionError("Timed out waiting for the status")
         }
+
+        fun awaitRequest(): Pair<Long, TunnelRequest> =
+            requests.poll(10, TimeUnit.SECONDS) ?: throw AssertionError("Timed out waiting for the request")
     }
 
     @Before
@@ -66,197 +82,164 @@ class LibOcteliumTest {
         }
     }
 
-    private fun getConfig(
-        stateDir: File = tmp.newFolder(),
-        stateKey: ByteArray = ByteArray(32) { it.toByte() },
-    ): Mobilev1.Config = Mobilev1.Config.newBuilder()
-        .setPlatform(Mobilev1.Config.Platform.ANDROID)
-        .setStateDir(stateDir.path)
-        .setStateKey(ByteString.copyFrom(stateKey))
-        .setDevice(Mobilev1.Config.Device.newBuilder().setId(UUID.randomUUID().toString()).setName("test"))
-        .setLogLevel(Mobilev1.Log.Level.DEBUG)
-        .build()
+    private fun getGateway(id: String, tunnelMode: TunnelMode): Userv1.Gateway {
+        val ret = Userv1.Gateway.newBuilder()
+            .setId(id)
+            .addAddresses("127.0.0.1")
+            .addCIDRs("10.100.0.0/16")
+            .addCIDRs("fdee:100::/64")
 
-    private suspend fun assertCode(code: Status.Code, fn: suspend () -> Unit) {
-        try {
-            fn()
-            fail()
-        } catch (err: StatusException) {
-            assertEquals(code, err.status.code)
+        if (tunnelMode == TunnelMode.QUICV0) {
+            ret.setQuicv0(Userv1.Gateway.QUICV0.newBuilder().setPort(1))
+        } else {
+            ret.setWireguard(
+                Userv1.Gateway.WireGuard.newBuilder()
+                    .setPort(51820)
+                    .setPublicKey("AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=")
+            )
         }
+
+        return ret.build()
+    }
+
+    private fun getConfig(
+        tunnelMode: TunnelMode = TunnelMode.WIREGUARD,
+        key: ByteArray? = ByteArray(32) { 1 },
+    ): TunnelConfig {
+        val state = Userv1.ConnectionState.newBuilder()
+            .setMtu(1400)
+            .setL3Mode(Userv1.ConnectionState.L3Mode.BOTH)
+            .addAddresses(Metav1.DualStackNetwork.newBuilder().setV4("10.200.0.2/32").setV6("fdee:200::2/128"))
+            .addGateways(getGateway("gw-1", tunnelMode))
+            .setDns(Userv1.DNS.newBuilder().addServers("fdee:100::53"))
+            .setCidr(Metav1.DualStackNetwork.newBuilder().setV4("10.100.0.0/16").setV6("fdee:100::/64"))
+
+        key?.let { state.setX25519Key(ByteString.copyFrom(it)) }
+
+        return TunnelConfig(
+            domain = "example.com",
+            state = state.build(),
+            preferences = TunnelPreferences(tunnelMode = tunnelMode, dnsMode = DNSMode.DEFAULT),
+        )
+    }
+
+    private fun getFD(file: RandomAccessFile): Int {
+        val field = FileDescriptor::class.java.getDeclaredField("fd")
+        field.isAccessible = true
+        return field.getInt(file.fd)
+    }
+
+    private fun openFIFO(): RandomAccessFile {
+        val path = File(tmp.root, "tun")
+        assertEquals(0, ProcessBuilder("mkfifo", path.path).start().waitFor())
+        return RandomAccessFile(path, "rw")
     }
 
     @Test
     fun testABI() {
-        assertEquals(ABI_VERSION, Native.abiVersion())
+        assertEquals(ABI_VERSION_MAJOR, Native.abiVersion() ushr 16)
+        assertEquals(Native.hostABIVersion(), Native.abiVersion())
+        assertTrue(LibOctelium.getVersion().isNotEmpty())
+        assertEquals("1.0", formatABIVersion(Native.abiVersion()))
     }
 
     @Test
-    fun testClient() = runBlocking {
-        val callbacks = Callbacks()
-        val lib = LibOctelium.create(getConfig(), callbacks)
-        val c = LocalClient(lib)
+    fun testWireGuard() {
+        val handler = Handler()
+        val lib = LibOctelium.create(handler, LogLevel.DEBUG)
 
-        run {
-            val info = c.getInfo()
-            assertNull(checkInfo(info))
-            assertEquals(1, info.apiMajorVersion)
-            assertEquals("com.octelium.client:/callback/success", info.authenticationCallbackURL)
-            assertTrue(info.instanceID.isNotEmpty())
+        try {
+            lib.setConfig(getConfig(key = null))
+            fail()
+        } catch (err: TunnelException) {
+            assertEquals(TunnelError.INVALID_ARGUMENT, err.error)
+            assertTrue(err.message!!.isNotEmpty())
         }
 
-        run {
-            val status = c.getStatus()
-            assertTrue(status.domainsList.isEmpty())
+        lib.setConfig(getConfig())
+
+        val (id, req) = handler.awaitRequest()
+        assertTrue(req is TunnelRequest.ApplyNetworkConfig)
+
+        val cfg: NetworkConfig = (req as TunnelRequest.ApplyNetworkConfig).config
+        assertEquals(listOf("10.200.0.2/32", "fdee:200::2/128"), cfg.addresses)
+        assertEquals(listOf("10.100.0.0/16", "fdee:100::/64"), cfg.routes)
+        assertEquals(1400, cfg.mtu)
+        assertEquals(listOf("fdee:100::53"), cfg.dns?.servers)
+        assertTrue(cfg.dns!!.searchDomains.contains("local.example.com"))
+        assertTrue(cfg.generation > 0)
+
+        assertEquals(TunnelError.NOT_FOUND.code, lib.complete(id + 1000, TunnelResponse.ApplyNetworkConfig(-1)))
+
+        openFIFO().use { fifo ->
+            assertEquals(0, lib.complete(id, TunnelResponse.ApplyNetworkConfig(getFD(fifo))))
         }
 
-        run {
-            val ret = c.updateDomainSettings(
-                "Example.COM",
-                Daemonv1.DomainSettings.newBuilder()
-                    .setAutoConnect(true)
-                    .setConnectionOptions(
-                        Daemonv1.ConnectionOptions.newBuilder()
-                            .setTunnelMode(Daemonv1.ConnectionOptions.TunnelMode.QUICV0)
-                    )
-                    .build(),
-            )
-            assertEquals("example.com", ret.domain)
-            assertTrue(ret.autoConnect)
+        handler.awaitStatus { it.state == TunnelState.CONNECTED }
 
-            val status = callbacks.awaitStatus { it.domainsCount == 1 }
-            assertEquals("example.com", status.domainsList.single().domain)
-            assertTrue(status.domainsList.single().settings.autoConnect)
-            assertEquals(
-                Daemonv1.AuthenticationStatus.State.LOGGED_OUT,
-                status.domainsList.single().authentication.state,
-            )
-        }
+        lib.setNetworkState(false, "")
+        handler.awaitStatus { it.state == TunnelState.RECONNECTING }
 
-        run {
-            assertCode(Status.Code.UNAUTHENTICATED) { c.connect("example.com") }
-            assertCode(Status.Code.NOT_FOUND) { c.connect("unknown.example.com") }
-            assertCode(Status.Code.INVALID_ARGUMENT) { c.connect("not a domain") }
-            assertCode(Status.Code.UNAUTHENTICATED) { c.getAPICredential("example.com") }
-            assertCode(Status.Code.NOT_FOUND) { c.getOperation(UUID.randomUUID().toString()) }
-            assertCode(Status.Code.UNIMPLEMENTED) { lib.call("Unknown", ByteArray(0)) }
-            assertCode(Status.Code.INVALID_ARGUMENT) { lib.call("GetOperation", byteArrayOf(0xff.toByte())) }
-            assertCode(Status.Code.INVALID_ARGUMENT) {
-                c.updateDomainSettings(
-                    "example.com",
-                    Daemonv1.DomainSettings.newBuilder()
-                        .setConnectionOptions(
-                            Daemonv1.ConnectionOptions.newBuilder()
-                                .setImplementationMode(Daemonv1.ConnectionOptions.ImplementationMode.KERNEL)
-                        )
-                        .build(),
-                )
-            }
-        }
+        lib.setNetworkState(true, "100")
+        handler.awaitStatus { it.state == TunnelState.CONNECTED }
 
-        run {
-            c.setNetworkState(false, "")
-            c.setNetworkState(true, "100")
-        }
-
-        run {
-            assertEquals(
-                Status.Code.NOT_FOUND.value(),
-                lib.complete(12345, getPlatformErrorResponse("failed").toByteArray()),
-            )
-            assertEquals(Status.Code.INVALID_ARGUMENT.value(), lib.complete(1, byteArrayOf(0xff.toByte())))
-        }
-
-        run {
-            val op = c.deleteDomain("example.com")
-            assertEquals(Daemonv1.Operation.Type.DELETE, op.type)
-            callbacks.awaitStatus { it.domainsCount == 0 }
-        }
+        assertTrue(handler.logs.any { it.level == LogLevel.DEBUG })
 
         lib.close()
         lib.close()
 
-        assertCode(Status.Code.UNAVAILABLE) { c.getInfo() }
-        assertEquals(Status.Code.UNAVAILABLE.value(), lib.complete(1, ByteArray(0)))
+        assertEquals(TunnelError.NOT_FOUND.code, lib.complete(id, TunnelResponse.ApplyNetworkConfig(-1)))
+
+        try {
+            lib.setConfig(getConfig())
+            fail()
+        } catch (err: TunnelException) {
+            assertEquals(TunnelError.INVALID_STATE, err.error)
+        }
     }
 
     @Test
-    fun testPersistence() = runBlocking {
-        val stateDir = tmp.newFolder()
+    fun testQUICV0() {
+        val handler = Handler()
+        val lib = LibOctelium.create(handler, LogLevel.DEBUG)
 
-        run {
-            val lib = LibOctelium.create(getConfig(stateDir = stateDir), Callbacks())
-            LocalClient(lib).updateDomainSettings(
-                "example.com",
-                Daemonv1.DomainSettings.newBuilder().setAutoConnect(true).build(),
-            )
-            lib.close()
+        lib.setConfig(getConfig(tunnelMode = TunnelMode.QUICV0, key = null))
+
+        val (applyID, apply) = handler.awaitRequest()
+        assertTrue(apply is TunnelRequest.ApplyNetworkConfig)
+
+        openFIFO().use { fifo ->
+            assertEquals(0, lib.complete(applyID, TunnelResponse.ApplyNetworkConfig(getFD(fifo))))
         }
 
-        run {
-            val lib = LibOctelium.create(getConfig(stateDir = stateDir), Callbacks())
-            val status = LocalClient(lib).getStatus()
-            assertEquals(listOf("example.com"), status.domainsList.map { it.domain })
-            assertTrue(status.domainsList.single().settings.autoConnect)
-            lib.close()
-        }
+        val (tokenID, token) = handler.awaitRequest()
+        assertEquals(TunnelRequest.GetAccessToken, token)
 
-        run {
-            try {
-                LibOctelium.create(getConfig(stateDir = stateDir, stateKey = ByteArray(32) { 7 }), Callbacks())
-                fail()
-            } catch (err: StatusException) {
-                assertEquals(Status.Code.INTERNAL, err.status.code)
-            }
-        }
+        assertEquals(
+            0,
+            lib.complete(tokenID, TunnelResponse.Error(TunnelError.UNAUTHENTICATED, "Authentication is required")),
+        )
 
-        assertTrue(stateDir.listFiles()!!.isNotEmpty())
+        val st = handler.awaitStatus { it.error == TunnelError.UNAUTHENTICATED }
+        assertEquals(TunnelState.CONNECTING, st.state)
+
+        lib.close()
     }
 
     @Test
-    fun testInvalidConfig() {
-        run {
-            try {
-                LibOctelium.create(getConfig(stateKey = ByteArray(16)), Callbacks())
-                fail()
-            } catch (err: StatusException) {
-                assertEquals(Status.Code.INVALID_ARGUMENT, err.status.code)
-                assertEquals("The state key must be 32 bytes", err.status.description)
-            }
-        }
+    fun testPlatformError() {
+        val handler = Handler()
+        val lib = LibOctelium.create(handler)
 
-        run {
-            try {
-                LibOctelium.create(getConfig().toBuilder().clearDevice().build(), Callbacks())
-                fail()
-            } catch (err: StatusException) {
-                assertEquals(Status.Code.INVALID_ARGUMENT, err.status.code)
-            }
-        }
+        lib.setConfig(getConfig())
 
-        run {
-            try {
-                LibOctelium.create(
-                    getConfig().toBuilder().setPlatform(Mobilev1.Config.Platform.PLATFORM_UNSPECIFIED).build(),
-                    Callbacks(),
-                )
-                fail()
-            } catch (err: StatusException) {
-                assertEquals(Status.Code.INVALID_ARGUMENT, err.status.code)
-            }
-        }
+        val (id, _) = handler.awaitRequest()
+        assertEquals(0, lib.complete(id, TunnelResponse.Error(TunnelError.PLATFORM, "The VPN permission is not granted")))
 
-        run {
-            val ret = Native.newClient(byteArrayOf(0xff.toByte(), 0xff.toByte()), Callbacks())
-            assertEquals(Status.Code.INVALID_ARGUMENT.value(), ret.code)
-            assertEquals(0L, ret.handle)
-            assertTrue(ret.message.startsWith("Could not unmarshal the config"))
-        }
+        val st = handler.awaitStatus { it.state == TunnelState.FAILED }
+        assertEquals(TunnelError.PLATFORM, st.error)
+        assertTrue(st.message.contains("The VPN permission is not granted"))
 
-        run {
-            val ret = Native.call(987654321, "GetInfo", ByteArray(0))
-            assertEquals(Status.Code.NOT_FOUND.value(), ret.code)
-            assertEquals("Unknown client", ret.message)
-        }
+        lib.close()
     }
 }

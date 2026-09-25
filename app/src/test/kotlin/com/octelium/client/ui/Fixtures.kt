@@ -2,10 +2,10 @@ package com.octelium.client.ui
 
 import com.google.protobuf.Timestamp
 import com.octelium.client.core.local.LocalClient
-import com.octelium.client.core.local.LocalTransport
 import com.octelium.client.core.local.StatusStore
 import com.octelium.client.core.local.getStatusException
 import com.octelium.client.runtime.ClientRuntime
+import com.octelium.client.runtime.RuntimeInfo
 import com.octelium.client.runtime.RuntimeState
 import io.grpc.Status
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -14,7 +14,6 @@ import octelium.api.client.daemon.v1.Daemonv1
 import octelium.api.client.daemon.v1.Daemonv1.AuthenticationStatus
 import octelium.api.client.daemon.v1.Daemonv1.ConnectionOptions
 import octelium.api.client.daemon.v1.Daemonv1.ConnectionStatus
-import octelium.api.client.mobile.v1.Mobilev1
 import octelium.api.main.meta.v1.Metav1
 import octelium.api.main.user.v1.MainServiceGrpcKt
 import octelium.api.main.user.v1.Userv1
@@ -68,7 +67,7 @@ fun getLoggedOutDomain(domain: String): Daemonv1.DomainState = Daemonv1.DomainSt
 class FakeDaemon(
     private val statusStore: StatusStore,
     domains: List<Daemonv1.DomainState> = emptyList(),
-) : LocalTransport {
+) {
     val calls: MutableList<String> = Collections.synchronizedList(mutableListOf())
 
     private val domains = LinkedHashMap(domains.associateBy { it.domain })
@@ -88,10 +87,10 @@ class FakeDaemon(
         statusStore.update(getStatus())
     }
 
-    private fun setConnection(domain: String, state: ConnectionStatus.State): ByteArray {
+    private fun setConnection(domain: String, state: ConnectionStatus.State): Daemonv1.Operation {
         val cur = domains[domain] ?: throw getStatusException(Status.Code.NOT_FOUND.value(), "Unknown Cluster domain: $domain")
         setDomain(cur.toBuilder().setConnection(ConnectionStatus.newBuilder().setState(state)).build())
-        return getOperation(domain, Daemonv1.Operation.Type.CONNECT).toByteArray()
+        return getOperation(domain, Daemonv1.Operation.Type.CONNECT)
     }
 
     private fun getOperation(domain: String, type: Daemonv1.Operation.Type): Daemonv1.Operation =
@@ -102,38 +101,63 @@ class FakeDaemon(
             .setState(Daemonv1.Operation.State.SUCCEEDED)
             .build()
 
-    override suspend fun call(method: String, request: ByteArray): ByteArray {
+    private fun <T> call(method: String, fn: () -> T): T {
         calls.add(method)
+        return fn()
+    }
 
-        return when (method) {
-            "GetStatus" -> getStatus().toByteArray()
-            "Connect" -> setConnection(Daemonv1.ConnectRequest.parseFrom(request).domain, ConnectionStatus.State.CONNECTED)
-            "Disconnect" -> setConnection(
-                Daemonv1.DisconnectRequest.parseFrom(request).domain,
-                ConnectionStatus.State.DISCONNECTED,
-            )
+    private fun unimplemented(method: String): Nothing =
+        throw getStatusException(Status.Code.UNIMPLEMENTED.value(), "Unimplemented: $method")
 
-            "Logout" -> {
-                val domain = Daemonv1.LogoutRequest.parseFrom(request).domain
-                setDomain(getLoggedOutDomain(domain))
-                getOperation(domain, Daemonv1.Operation.Type.LOGOUT).toByteArray()
+    val client: LocalClient = object : LocalClient {
+        override suspend fun getStatus(): Daemonv1.GetStatusResponse = call("GetStatus") { this@FakeDaemon.getStatus() }
+
+        override suspend fun authenticateBrowser(domain: String): Daemonv1.Operation =
+            call("Authenticate") { unimplemented("Authenticate") }
+
+        override suspend fun authenticateToken(domain: String, authenticationToken: String): Daemonv1.Operation =
+            call("Authenticate") { unimplemented("Authenticate") }
+
+        override suspend fun completeAuthentication(operationID: String, callbackURL: String): Daemonv1.Operation =
+            call("CompleteAuthentication") { unimplemented("CompleteAuthentication") }
+
+        override suspend fun connect(domain: String): Daemonv1.Operation =
+            call("Connect") { setConnection(domain, ConnectionStatus.State.CONNECTED) }
+
+        override suspend fun disconnect(domain: String): Daemonv1.Operation =
+            call("Disconnect") { setConnection(domain, ConnectionStatus.State.DISCONNECTED) }
+
+        override suspend fun logout(domain: String): Daemonv1.Operation = call("Logout") {
+            setDomain(getLoggedOutDomain(domain))
+            getOperation(domain, Daemonv1.Operation.Type.LOGOUT)
+        }
+
+        override suspend fun deleteDomain(domain: String): Daemonv1.Operation =
+            call("DeleteDomain") { unimplemented("DeleteDomain") }
+
+        override suspend fun getOperation(id: String): Daemonv1.Operation =
+            call("GetOperation") { unimplemented("GetOperation") }
+
+        override suspend fun cancelOperation(id: String): Daemonv1.Operation =
+            call("CancelOperation") { unimplemented("CancelOperation") }
+
+        override suspend fun getAPICredential(domain: String): Daemonv1.GetAPICredentialResponse =
+            call("GetAPICredential") {
+                Daemonv1.GetAPICredentialResponse.newBuilder().setAccessToken("token").build()
             }
 
-            "UpdateDomainSettings" -> {
-                val req = Daemonv1.UpdateDomainSettingsRequest.parseFrom(request)
-                val settings = req.settings.toBuilder().setDomain(req.domain).build()
-                val cur = domains[req.domain] ?: getLoggedOutDomain(req.domain)
-                setDomain(cur.toBuilder().setSettings(settings).build())
-                settings.toByteArray()
-            }
+        override suspend fun updateDomainSettings(
+            domain: String,
+            settings: Daemonv1.DomainSettings,
+        ): Daemonv1.DomainSettings = call("UpdateDomainSettings") {
+            val ret = settings.toBuilder().setDomain(domain).build()
+            val cur = this@FakeDaemon.domains[domain] ?: getLoggedOutDomain(domain)
+            setDomain(cur.toBuilder().setSettings(ret).build())
+            ret
+        }
 
-            "GetAPICredential" -> Daemonv1.GetAPICredentialResponse.newBuilder()
-                .setAccessToken("token")
-                .build()
-                .toByteArray()
-
-            "SetNetworkState" -> Mobilev1.SetNetworkStateResponse.getDefaultInstance().toByteArray()
-            else -> throw getStatusException(Status.Code.UNIMPLEMENTED.value(), "Unimplemented: $method")
+        override suspend fun setNetworkState(isAvailable: Boolean, id: String) {
+            calls.add("SetNetworkState")
         }
     }
 }
@@ -146,14 +170,13 @@ class FakeRuntime(initial: RuntimeState) : ClientRuntime {
     override fun reset() {}
 }
 
-fun getReadyState(transport: LocalTransport): RuntimeState.Ready = RuntimeState.Ready(
-    client = LocalClient(transport),
-    info = Mobilev1.GetInfoResponse.newBuilder()
-        .setVersion("v0.44.0")
-        .setApiMajorVersion(1)
-        .setInstanceID("instance")
-        .setAuthenticationCallbackURL(TEST_CALLBACK_URL)
-        .build(),
+fun getReadyState(daemon: FakeDaemon): RuntimeState.Ready = RuntimeState.Ready(
+    client = daemon.client,
+    info = RuntimeInfo(
+        version = "v0.1.0",
+        abiVersion = 1 shl 16,
+        instanceID = "instance",
+    ),
 )
 
 val TEST_SERVICES: List<Userv1.Service> = listOf(

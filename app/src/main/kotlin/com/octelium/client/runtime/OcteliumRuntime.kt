@@ -4,27 +4,29 @@ import android.content.Context
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
-import com.google.protobuf.ByteString
 import com.octelium.client.BuildConfig
-import com.octelium.client.core.local.EventHandler
+import com.octelium.client.core.auth.DeviceInfo
+import com.octelium.client.core.client.OcteliumClient
+import com.octelium.client.core.cluster.ChannelFactory
+import com.octelium.client.core.db.DB
+import com.octelium.client.core.db.DBException
 import com.octelium.client.core.local.LocalClient
+import com.octelium.client.core.local.LogEntry
+import com.octelium.client.core.local.LogLevel
 import com.octelium.client.core.local.LogStore
+import com.octelium.client.core.local.Logger
 import com.octelium.client.core.local.StatusStore
-import com.octelium.client.core.local.checkInfo
 import com.octelium.client.core.local.getErrorMessage
 import com.octelium.client.core.security.InstallationID
 import com.octelium.client.core.security.StateKeyStore
 import com.octelium.client.core.security.StateKeyUnavailableException
-import com.octelium.client.core.tunnel.PlatformRequestHandler
 import com.octelium.client.core.tunnel.TunnelHost
 import com.octelium.client.lib.LibOctelium
 import com.octelium.client.lib.LibraryUnavailableException
-import com.octelium.client.lib.NativeCallbacks
 import com.octelium.client.security.KeystoreKeyWrapper
 import io.grpc.Status
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -33,15 +35,20 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import octelium.api.client.mobile.v1.Mobilev1
 import java.io.File
+
+data class RuntimeInfo(
+    val version: String,
+    val abiVersion: Int,
+    val instanceID: String,
+)
 
 sealed interface RuntimeState {
     data object Loading : RuntimeState
 
     data class Ready(
         val client: LocalClient,
-        val info: Mobilev1.GetInfoResponse,
+        val info: RuntimeInfo,
     ) : RuntimeState
 
     data class Failed(
@@ -62,28 +69,22 @@ interface ClientRuntime {
         is RuntimeState.Failed -> throw Status.UNAVAILABLE.withDescription(ret.message).asException()
         RuntimeState.Loading -> throw IllegalStateException()
     }
-
-    suspend fun awaitInfo(): Mobilev1.GetInfoResponse {
-        awaitClient()
-        return (state.value as RuntimeState.Ready).info
-    }
 }
 
 private const val LOG_TAG = "liboctelium"
 
-@OptIn(ExperimentalCoroutinesApi::class)
 class OcteliumRuntime(
     private val context: Context,
     private val scope: CoroutineScope,
     private val statusStore: StatusStore,
     private val logStore: LogStore,
     private val tunnelHost: TunnelHost,
+    private val channels: ChannelFactory,
 ) : ClientRuntime {
     private val _state = MutableStateFlow<RuntimeState>(RuntimeState.Loading)
     override val state: StateFlow<RuntimeState> = _state.asStateFlow()
 
     private val mutex = Mutex()
-    private val requestDispatcher = Dispatchers.Default.limitedParallelism(1)
 
     private val stateDir = File(context.noBackupFilesDir, "octelium")
     private val keyStore = StateKeyStore(
@@ -92,7 +93,9 @@ class OcteliumRuntime(
         wrapper = KeystoreKeyWrapper(context),
     )
 
-    private var lib: LibOctelium? = null
+    private val logLevel = if (BuildConfig.DEBUG) LogLevel.DEBUG else LogLevel.INFO
+
+    private var client: OcteliumClient? = null
 
     override fun start() {
         scope.launch {
@@ -106,8 +109,8 @@ class OcteliumRuntime(
         scope.launch {
             mutex.withLock {
                 withContext(Dispatchers.IO) {
-                    lib?.close()
-                    lib = null
+                    client?.close()
+                    client = null
                     statusStore.reset()
                     logStore.clear()
                     keyStore.reset()
@@ -131,7 +134,7 @@ class OcteliumRuntime(
                 isResettable = true,
             )
         } catch (err: Exception) {
-            Log.w(LOG_TAG, "Could not start liboctelium", err)
+            Log.w(LOG_TAG, "Could not start the Octelium client", err)
             RuntimeState.Failed(getErrorMessage(err), isResettable = false)
         }
     }
@@ -139,79 +142,56 @@ class OcteliumRuntime(
     private suspend fun startClient(): RuntimeState {
         val stateKey = keyStore.getOrCreate()
 
-        val cfg = Mobilev1.Config.newBuilder()
-            .setPlatform(Mobilev1.Config.Platform.ANDROID)
-            .setStateDir(stateDir.path)
-            .setStateKey(ByteString.copyFrom(stateKey))
-            .setDevice(
-                Mobilev1.Config.Device.newBuilder()
-                    .setId(InstallationID(File(context.noBackupFilesDir, "installation-id")).get())
-                    .setName(getDeviceName())
-            )
-            .setLogLevel(if (BuildConfig.DEBUG) Mobilev1.Log.Level.DEBUG else Mobilev1.Log.Level.INFO)
-            .build()
-
-        stateKey.fill(0)
-
-        val callbacks = RuntimeCallbacks(EventHandler(statusStore, logStore, ::writeLog))
-
         val ret = try {
-            LibOctelium.create(cfg, callbacks)
-        } catch (err: Exception) {
+            OcteliumClient(
+                db = DB(stateDir, stateKey),
+                device = DeviceInfo(
+                    installationID = InstallationID(File(context.noBackupFilesDir, "installation-id")).get(),
+                    name = getDeviceName(),
+                ),
+                channels = channels,
+                tunnels = { LibOctelium.create(it, logLevel) },
+                host = tunnelHost,
+                onStatus = statusStore::update,
+                logger = Logger(logLevel, ::writeLog),
+            )
+        } catch (err: DBException) {
             return RuntimeState.Failed(
                 "Could not open the local Octelium state: ${getErrorMessage(err)}",
                 isResettable = true,
             )
+        } finally {
+            stateKey.fill(0)
         }
 
-        callbacks.requestHandler = PlatformRequestHandler(tunnelHost, ret)
-        lib = ret
+        client = ret
 
-        return try {
-            val client = LocalClient(ret)
-            val info = client.getInfo()
+        statusStore.update(ret.getStatus())
 
-            checkInfo(info)?.let {
-                return RuntimeState.Failed(it, isResettable = false)
-            }
-
-            statusStore.update(client.getStatus())
-
-            RuntimeState.Ready(client, info)
-        } catch (err: Exception) {
-            RuntimeState.Failed(getErrorMessage(err), isResettable = false)
-        }
+        return RuntimeState.Ready(
+            ret,
+            RuntimeInfo(
+                version = LibOctelium.getVersion(),
+                abiVersion = LibOctelium.getABIVersion(),
+                instanceID = ret.instanceID,
+            ),
+        )
     }
 
     private fun getDeviceName(): String =
         Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME)?.ifBlank { null }
             ?: "${Build.MANUFACTURER} ${Build.MODEL}"
 
-    private fun writeLog(log: Mobilev1.Log) {
+    private fun writeLog(log: LogEntry) {
+        logStore.add(log)
+
         val priority = when (log.level) {
-            Mobilev1.Log.Level.DEBUG -> Log.DEBUG
-            Mobilev1.Log.Level.WARN -> Log.WARN
-            Mobilev1.Log.Level.ERROR -> Log.ERROR
-            else -> Log.INFO
+            LogLevel.DEBUG -> Log.DEBUG
+            LogLevel.WARN -> Log.WARN
+            LogLevel.ERROR -> Log.ERROR
+            LogLevel.INFO -> Log.INFO
         }
 
         Log.println(priority, LOG_TAG, log.message)
-    }
-
-    private inner class RuntimeCallbacks(private val eventHandler: EventHandler) : NativeCallbacks {
-        @Volatile
-        var requestHandler: PlatformRequestHandler? = null
-
-        override fun onEvent(data: ByteArray) {
-            eventHandler.handle(data)
-        }
-
-        override fun onRequest(requestID: Long, data: ByteArray) {
-            val handler = requestHandler ?: return
-
-            scope.launch(requestDispatcher) {
-                handler.handle(requestID, data)
-            }
-        }
     }
 }
