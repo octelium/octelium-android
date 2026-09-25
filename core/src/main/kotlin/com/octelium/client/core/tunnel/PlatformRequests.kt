@@ -1,7 +1,10 @@
 package com.octelium.client.core.tunnel
 
 import com.google.protobuf.InvalidProtocolBufferException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import octelium.api.client.mobile.v1.Mobilev1
+import java.util.concurrent.atomic.AtomicLong
 
 interface EstablishedTunnel {
     val fd: Int
@@ -23,6 +26,9 @@ class PlatformRequestHandler(
     private val host: TunnelHost,
     private val completer: RequestCompleter,
 ) {
+    private val mutex = Mutex()
+    private val latestGeneration = AtomicLong(0)
+
     suspend fun handle(requestID: Long, data: ByteArray) {
         val req = try {
             Mobilev1.PlatformRequest.parseFrom(data)
@@ -43,6 +49,8 @@ class PlatformRequestHandler(
         requestID: Long,
         req: Mobilev1.PlatformRequest.ApplyTunnelConfiguration,
     ) {
+        latestGeneration.updateAndGet { maxOf(it, req.generation) }
+
         if (req.domain.isEmpty()) {
             completeError(requestID, "The domain is not set")
             return
@@ -52,6 +60,21 @@ class PlatformRequestHandler(
             getTunnelSpec(req.configuration)
         } catch (err: InvalidTunnelConfigurationException) {
             completeError(requestID, err.message ?: "Invalid tunnel configuration")
+            return
+        }
+
+        mutex.withLock {
+            establish(requestID, req, spec)
+        }
+    }
+
+    private suspend fun establish(
+        requestID: Long,
+        req: Mobilev1.PlatformRequest.ApplyTunnelConfiguration,
+        spec: TunnelSpec,
+    ) {
+        if (req.generation < latestGeneration.get()) {
+            completeError(requestID, "The tunnel configuration is stale")
             return
         }
 

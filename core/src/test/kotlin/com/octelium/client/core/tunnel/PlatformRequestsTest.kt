@@ -1,5 +1,9 @@
 package com.octelium.client.core.tunnel
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import octelium.api.client.mobile.v1.Mobilev1
 import org.junit.Assert.assertEquals
@@ -7,6 +11,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class PlatformRequestsTest {
 
     private class FakeTunnel(override val fd: Int) : EstablishedTunnel {
@@ -22,11 +27,15 @@ class PlatformRequestsTest {
         }
     }
 
-    private class FakeHost(private val err: Exception? = null) : TunnelHost {
+    private class FakeHost(
+        private val err: Exception? = null,
+        private val gate: CompletableDeferred<Unit>? = null,
+    ) : TunnelHost {
         val tunnels = mutableListOf<FakeTunnel>()
         val specs = mutableListOf<Triple<String, Long, TunnelSpec>>()
 
         override suspend fun establish(domain: String, generation: Long, spec: TunnelSpec): EstablishedTunnel {
+            gate?.await()
             err?.let { throw it }
             specs.add(Triple(domain, generation, spec))
             return FakeTunnel(100 + tunnels.size).also { tunnels.add(it) }
@@ -94,6 +103,47 @@ class PlatformRequestsTest {
 
         assertFalse(host.tunnels.single().isCommitted)
         assertTrue(host.tunnels.single().isAborted)
+    }
+
+    @Test
+    fun testStaleGeneration() = runTest {
+        val host = FakeHost()
+        val completer = FakeCompleter()
+        val h = PlatformRequestHandler(host, completer)
+
+        h.handle(1, getRequest(generation = 5))
+        h.handle(2, getRequest(generation = 3))
+        h.handle(3, getRequest(generation = 6))
+
+        assertEquals(listOf(5L, 6L), host.specs.map { it.second })
+        assertEquals(listOf(1L, 2L, 3L), completer.responses.map { it.first })
+        assertTrue(completer.responses[0].second.hasApplyTunnelConfiguration())
+        assertEquals("The tunnel configuration is stale", completer.responses[1].second.error.message)
+        assertTrue(completer.responses[2].second.hasApplyTunnelConfiguration())
+    }
+
+    @Test
+    fun testStaleGenerationWhileEstablishing() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val host = FakeHost(gate = gate)
+        val completer = FakeCompleter()
+        val h = PlatformRequestHandler(host, completer)
+
+        for (generation in 1L..3L) {
+            launch { h.handle(generation, getRequest(generation = generation)) }
+        }
+        advanceUntilIdle()
+
+        assertTrue(host.specs.isEmpty())
+        assertTrue(completer.responses.isEmpty())
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(listOf(1L, 3L), host.specs.map { it.second })
+        assertEquals(listOf(1L, 2L, 3L), completer.responses.map { it.first })
+        assertEquals("The tunnel configuration is stale", completer.responses[1].second.error.message)
+        assertTrue(completer.responses[2].second.hasApplyTunnelConfiguration())
     }
 
     @Test
